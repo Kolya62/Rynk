@@ -644,6 +644,20 @@ impl KeyboardEngine {
         }
     }
 
+    /// Forgets every touch in progress: no pointer, no pressed key, no popup. Used when the
+    /// keyboard is shown again and when a new first finger lands, so a touch whose release never
+    /// arrived (keyboard hidden mid-press, finger lifted over the navigation bar) cannot leave
+    /// keys looking pressed.
+    pub fn reset_touch_state(&mut self) {
+        self.touch_tracker.pointers.clear();
+        self.touch_down_points.clear();
+        self.pending_touch = None;
+        self.active_popup_key_id = None;
+        for key in self.keys.iter_mut() {
+            key.is_pressed = false;
+        }
+    }
+
     pub fn tick(&mut self, current_time_ms: u64) {
         match self.touch_tracker.check_long_press(current_time_ms, &self.keys) {
             Some(TouchResult::LongPressTriggered { .. }) => {

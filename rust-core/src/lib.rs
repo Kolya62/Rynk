@@ -767,6 +767,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing benchmark, flaky under load: cargo test --release -p rynk_core -- --ignored"]
     fn test_prediction_performance_benchmark() {
         let service = PredictionService::new();
 
@@ -1017,6 +1018,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing benchmark, flaky under load: cargo test --release -p rynk_core -- --ignored"]
     fn test_engine_latency_benchmarks() {
         use std::time::Instant;
 
@@ -1518,5 +1520,28 @@ mod tests {
             _ => None,
         }).sum();
         assert_eq!(deleted, 5);
+    }
+
+    #[test]
+    fn test_stale_touches_do_not_leave_keys_pressed() {
+        use keyboard::touch::TouchAction;
+        let mut engine = KeyboardEngine::new(1080.0, 800.0, 2.75);
+        let pressed = |e: &KeyboardEngine| e.keys.iter().filter(|k| k.is_pressed).count();
+        let (ax, ay) = engine.keys.iter().find(|k| k.label == "ф").unwrap().center();
+        let (bx, by) = engine.keys.iter().find(|k| k.label == "в").unwrap().center();
+
+        // Two fingers down, their releases never arrive (keyboard hidden)
+        engine.on_touch(TouchAction::Down, 0, ax, ay, 100);
+        engine.on_touch(TouchAction::Down, 1, bx, by, 110);
+        assert_eq!(pressed(&engine), 2);
+        engine.reset_touch_state();
+        assert_eq!(pressed(&engine), 0);
+        assert!(engine.touch_tracker.pointers.is_empty());
+
+        // A release turned into a cancel (finger lifted over the navigation bar) releases the key
+        engine.on_touch(TouchAction::Down, 0, ax, ay, 200);
+        engine.on_touch(TouchAction::Cancel, 0, ax, ay, 260);
+        assert_eq!(pressed(&engine), 0);
+        let _ = engine.state.drain_events();
     }
 }

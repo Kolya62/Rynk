@@ -266,12 +266,23 @@ class RynkKeyboardView @JvmOverloads constructor(
         val x = event.getX(actionIndex)
         val y = event.getY(actionIndex)
 
+        if (actionMasked == MotionEvent.ACTION_DOWN) {
+            // First finger: nothing else can be held, so any leftover touch state is stale
+            cancelAllActivePointers()
+            NativeBridge.nativeCancelTouches()
+        }
+
         if (y > contentH) {
             val ptr = activePointers.get(pointerId)
             if (ptr != null) {
                 ptr.longPressRunnable?.let { gestureHandler.removeCallbacks(it) }
                 ptr.repeatRunnable?.let { gestureHandler.removeCallbacks(it) }
                 activePointers.remove(pointerId)
+            }
+            // Lifted over the navigation bar inset: the core still has to release the key
+            if (actionMasked == MotionEvent.ACTION_UP || actionMasked == MotionEvent.ACTION_POINTER_UP) {
+                NativeBridge.nativeOnTouchEvent(3 /* Cancel */, pointerId, x, y, timeMs)
+                invalidate()
             }
             return false
         }
@@ -541,6 +552,7 @@ class RynkKeyboardView @JvmOverloads constructor(
 
     fun resetState() {
         cancelAllActivePointers()
+        if (NativeBridge.isCoreInitialized) NativeBridge.nativeCancelTouches()
         resetComposingState()
     }
 

@@ -144,6 +144,8 @@ class RynkInputMethodService : InputMethodService() {
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
         saveAdaptiveDictionary()
+        // A finger can still be down when the keyboard hides; its release never comes
+        keyboardView?.resetState()
     }
 
     private fun saveAdaptiveDictionary() {

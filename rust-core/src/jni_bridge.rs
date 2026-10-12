@@ -545,8 +545,9 @@ pub extern "system" fn Java_org_rynk_keyboard_NativeBridge_nativeRender(
             let total_pixels = stride_u32 * info.height as usize;
             let slice = std::slice::from_raw_parts_mut(pixels_ptr as *mut u32, total_pixels);
 
-            let mut canvas =
-                Canvas::new(slice, info.width as usize, info.height as usize, stride_u32);
+            // The scene is recorded once, then rasterized in horizontal bands on several cores
+            let (frame_w, frame_h) = (info.width as usize, info.height as usize);
+            let mut canvas = Canvas::recording(frame_w, frame_h);
 
             if core.engine.state.mode == KeyboardMode::Clipboard {
                 core.renderer.text_labels.clear();
@@ -578,6 +579,15 @@ pub extern "system" fn Java_org_rynk_keyboard_NativeBridge_nativeRender(
                     .render(&mut canvas, &core.engine, time_ms as u64, &core.engine.cached_suggestions);
             }
 
+            let cmds = canvas.take_commands();
+            crate::render::canvas::rasterize_parallel(
+                &cmds,
+                slice,
+                frame_w,
+                frame_h,
+                stride_u32,
+                crate::render::canvas::raster_threads(frame_w * frame_h),
+            );
             AndroidBitmap_unlockPixels(raw_env, bitmap);
             return if core.renderer.animation_mgr.has_active_animations() {
                 1
@@ -605,7 +615,18 @@ pub extern "system" fn Java_org_rynk_keyboard_NativeBridge_nativeReset(
         core.engine.state.composing_text.clear();
         core.engine.state.clear_context(false);
         core.engine.suggestions_dirty = true;
-        core.engine.active_popup_key_id = None;
+        core.engine.reset_touch_state();
+        core.renderer.animation_mgr.ripples.clear();
+    }
+}
+
+/// Drops all touches in progress (first finger down, keyboard hidden).
+#[no_mangle]
+pub extern "system" fn Java_org_rynk_keyboard_NativeBridge_nativeCancelTouches(_env: JNIEnv, _class: JClass) {
+    let mut guard = CORE_INSTANCE.lock().unwrap();
+    if let Some(core) = guard.as_mut() {
+        core.engine.reset_touch_state();
+        core.renderer.animation_mgr.ripples.clear();
     }
 }
 

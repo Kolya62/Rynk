@@ -71,6 +71,8 @@ object NativeBridge {
     external fun nativePollEventsBinary(): ByteArray?
     external fun nativeGetTextLabels(): String
     external fun nativeReset()
+    /** Drops all touches in progress and pressed keys */
+    external fun nativeCancelTouches()
     external fun nativeHandleBack(): Boolean
     external fun nativeIsBackspaceAt(x: Float, y: Float): Boolean
     external fun nativeRepeatBackspace(count: Int)

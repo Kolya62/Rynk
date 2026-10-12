@@ -67,11 +67,31 @@ impl Color {
     }
 }
 
+/// A drawing operation recorded by a [`Canvas`] in recording mode
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DrawCmd {
+    Clear(Color),
+    Rect { x: f32, y: f32, w: f32, h: f32, color: Color },
+    RoundedRect { x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color },
+    Circle { cx: f32, cy: f32, radius: f32, color: Color },
+    Ripple { cx: f32, cy: f32, radius: f32, color: Color },
+}
+
+/// Software rasterizer over an ARGB pixel buffer.
+///
+/// A canvas either draws directly, covers only a horizontal band of the frame (rows
+/// `row_start..row_end` of a `height`-row frame, used to rasterize bands on several cores), or
+/// records the operations for later replay ([`Canvas::recording`], [`rasterize_parallel`]).
 pub struct Canvas<'a> {
     pub pixels: &'a mut [u32],
     pub width: usize,
     pub height: usize,
     pub stride: usize,
+    /// First frame row held by `pixels`
+    row_start: usize,
+    /// One past the last frame row held by `pixels`
+    row_end: usize,
+    recording: Option<Vec<DrawCmd>>,
 }
 
 impl<'a> Canvas<'a> {
@@ -81,14 +101,84 @@ impl<'a> Canvas<'a> {
             width,
             height,
             stride,
+            row_start: 0,
+            row_end: height,
+            recording: None,
         }
+    }
+
+    /// The rows `row_start..row_start + pixels.len() / stride` of a `height`-row frame
+    pub fn band(pixels: &'a mut [u32], width: usize, height: usize, stride: usize, row_start: usize) -> Self {
+        let rows = pixels.len() / stride.max(1);
+        Self {
+            pixels,
+            width,
+            height,
+            stride,
+            row_start,
+            row_end: (row_start + rows).min(height),
+            recording: None,
+        }
+    }
+
+    /// A canvas that only records drawing operations (see [`Canvas::take_commands`])
+    pub fn recording(width: usize, height: usize) -> Canvas<'static> {
+        Canvas {
+            pixels: &mut [],
+            width,
+            height,
+            stride: width,
+            row_start: 0,
+            row_end: 0,
+            recording: Some(Vec::with_capacity(256)),
+        }
+    }
+
+    pub fn take_commands(&mut self) -> Vec<DrawCmd> {
+        self.recording.take().unwrap_or_default()
+    }
+
+    /// Records `cmd` in recording mode; returns true if it was recorded instead of drawn
+    #[inline(always)]
+    fn record(&mut self, cmd: DrawCmd) -> bool {
+        match &mut self.recording {
+            Some(list) => {
+                list.push(cmd);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn apply(&mut self, cmd: &DrawCmd) {
+        match *cmd {
+            DrawCmd::Clear(c) => self.clear(c),
+            DrawCmd::Rect { x, y, w, h, color } => self.fill_rect(x, y, w, h, color),
+            DrawCmd::RoundedRect { x, y, w, h, radius, color } => self.fill_rounded_rect(x, y, w, h, radius, color),
+            DrawCmd::Circle { cx, cy, radius, color } => self.fill_circle(cx, cy, radius, color),
+            DrawCmd::Ripple { cx, cy, radius, color } => self.draw_ripple(cx, cy, radius, color),
+        }
+    }
+
+    /// Clamps a frame row range to the rows this canvas holds
+    #[inline(always)]
+    fn rows(&self, y0: usize, y1: usize) -> (usize, usize) {
+        (y0.max(self.row_start), y1.min(self.row_end))
+    }
+
+    #[inline(always)]
+    fn row_offset(&self, y: usize) -> usize {
+        (y - self.row_start) * self.stride
     }
 
     #[inline(always)]
     pub fn clear(&mut self, color: Color) {
+        if self.record(DrawCmd::Clear(color)) {
+            return;
+        }
         let val = color.to_u32();
-        for row in 0..self.height {
-            let start = row * self.stride;
+        for y in self.row_start..self.row_end {
+            let start = self.row_offset(y);
             let end = start + self.width;
             self.pixels[start..end].fill(val);
         }
@@ -96,8 +186,8 @@ impl<'a> Canvas<'a> {
 
     #[inline(always)]
     pub fn set_pixel(&mut self, x: usize, y: usize, color: Color) {
-        if x < self.width && y < self.height {
-            let idx = y * self.stride + x;
+        if x < self.width && y >= self.row_start && y < self.row_end {
+            let idx = self.row_offset(y) + x;
             if color.a == 255 {
                 self.pixels[idx] = color.to_u32();
             } else if color.a > 0 {
@@ -114,16 +204,18 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+        if self.record(DrawCmd::Rect { x, y, w, h, color }) {
+            return;
+        }
         let x0 = (x.max(0.0) as usize).min(self.width);
-        let y0 = (y.max(0.0) as usize).min(self.height);
         let x1 = ((x + w).max(0.0) as usize).min(self.width);
-        let y1 = ((y + h).max(0.0) as usize).min(self.height);
+        let (y0, y1) = self.rows(y.max(0.0) as usize, (y + h).max(0.0) as usize);
 
         if color.a == 255 {
             let val = color.to_u32();
             for py in y0..y1 {
-                let row_start = py * self.stride;
-                self.pixels[row_start + x0..row_start + x1].fill(val);
+                let offset = self.row_offset(py);
+                self.pixels[offset + x0..offset + x1].fill(val);
             }
         } else if color.a > 0 {
             for py in y0..y1 {
@@ -136,15 +228,17 @@ impl<'a> Canvas<'a> {
 
     #[inline(always)]
     pub fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
-        if radius <= 0.0 || color.a == 0 {
+        if radius <= 0.0 || color.a == 0 || self.record(DrawCmd::Circle { cx, cy, radius, color }) {
             return;
         }
         let r_ceil = radius.ceil() as isize;
         let cy_i = cy.round() as isize;
         let r_sq = radius * radius;
 
-        let y0 = (cy_i - r_ceil).max(0) as usize;
-        let y1 = (cy_i + r_ceil + 1).min(self.height as isize).max(0) as usize;
+        let (y0, y1) = self.rows(
+            (cy_i - r_ceil).max(0) as usize,
+            (cy_i + r_ceil + 1).min(self.height as isize).max(0) as usize,
+        );
 
         for py in y0..y1 {
             let dy = py as f32 + 0.5 - cy;
@@ -163,7 +257,7 @@ impl<'a> Canvas<'a> {
 
     /// Fast scanline anti-aliased rounded rectangle
     pub fn fill_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color) {
-        if w <= 0.0 || h <= 0.0 || color.a == 0 {
+        if w <= 0.0 || h <= 0.0 || color.a == 0 || self.record(DrawCmd::RoundedRect { x, y, w, h, radius, color }) {
             return;
         }
 
@@ -173,8 +267,7 @@ impl<'a> Canvas<'a> {
             return;
         }
 
-        let y0 = (y.floor() as isize).max(0) as usize;
-        let y1 = ((y + h).ceil() as usize).min(self.height);
+        let (y0, y1) = self.rows((y.floor() as isize).max(0) as usize, ((y + h).ceil() as usize).min(self.height));
         if y0 >= y1 {
             return;
         }
@@ -205,7 +298,7 @@ impl<'a> Canvas<'a> {
             let left_f = center_x - span_half_w;
             let right_f = center_x + span_half_w;
 
-            let row_start = py * self.stride;
+            let offset = self.row_offset(py);
 
             // Fully interior pixel interval
             let inner_x0 = (left_f + 0.5).ceil() as usize;
@@ -216,7 +309,7 @@ impl<'a> Canvas<'a> {
 
             if rx0 < rx1 {
                 if color.a == 255 {
-                    self.pixels[row_start + rx0..row_start + rx1].fill(val);
+                    self.pixels[offset + rx0..offset + rx1].fill(val);
                 } else {
                     for px in rx0..rx1 {
                         self.set_pixel(px, py, color);
@@ -277,12 +370,11 @@ impl<'a> Canvas<'a> {
 
     /// Draws an expanding ripple animation circle
     pub fn draw_ripple(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
-        if radius <= 0.5 || color.a == 0 {
+        if radius <= 0.5 || color.a == 0 || self.record(DrawCmd::Ripple { cx, cy, radius, color }) {
             return;
         }
 
-        let y0 = ((cy - radius).floor() as isize).max(0) as usize;
-        let y1 = ((cy + radius).ceil() as usize).min(self.height);
+        let (y0, y1) = self.rows(((cy - radius).floor() as isize).max(0) as usize, ((cy + radius).ceil() as usize).min(self.height));
         let r_sq = radius * radius;
 
         for py in y0..y1 {
@@ -297,6 +389,67 @@ impl<'a> Canvas<'a> {
             for px in x0..x1 {
                 self.set_pixel(px, py, color);
             }
+        }
+    }
+}
+
+/// Worker threads for a frame of `pixels` pixels: big frames go to up to four cores, small
+/// ones stay on one (spawning threads costs more than it saves there)
+pub fn raster_threads(pixels: usize) -> usize {
+    const MIN_PIXELS_PER_THREAD: usize = 300_000;
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    (pixels / MIN_PIXELS_PER_THREAD).clamp(1, cores.min(4))
+}
+
+/// Replays `cmds` into the frame, splitting it into horizontal bands rasterized in parallel.
+/// The result is identical to drawing on one thread: every band clips each command to its rows.
+pub fn rasterize_parallel(cmds: &[DrawCmd], pixels: &mut [u32], width: usize, height: usize, stride: usize, threads: usize) {
+    let threads = threads.clamp(1, height.max(1));
+    let band_rows = height.div_ceil(threads);
+    if threads == 1 {
+        let mut canvas = Canvas::new(pixels, width, height, stride);
+        cmds.iter().for_each(|c| canvas.apply(c));
+        return;
+    }
+    let len = (stride * height).min(pixels.len());
+    let pixels = &mut pixels[..len];
+    std::thread::scope(|scope| {
+        for (i, band) in pixels.chunks_mut(band_rows * stride).enumerate() {
+            scope.spawn(move || {
+                let mut canvas = Canvas::band(band, width, height, stride, i * band_rows);
+                cmds.iter().for_each(|c| canvas.apply(c));
+            });
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scene(c: &mut Canvas) {
+        c.clear(Color::rgb(10, 20, 30));
+        c.fill_rect(5.3, 7.1, 200.0, 33.0, Color::rgba(200, 100, 50, 180));
+        c.fill_rounded_rect(20.5, 30.25, 300.0, 120.0, 14.0, Color::rgb(90, 90, 200));
+        c.fill_rounded_rect(40.0, 90.0, 100.0, 200.0, 9.0, Color::rgba(250, 250, 250, 120));
+        c.fill_circle(160.0, 140.0, 61.5, Color::rgba(0, 255, 0, 90));
+        c.draw_ripple(250.0, 250.0, 80.0, Color::rgba(255, 0, 255, 60));
+        c.draw_drop_shadow(10.0, 200.0, 120.0, 40.0, 8.0, 4.0, Color::rgba(0, 0, 0, 80));
+    }
+
+    #[test]
+    fn parallel_bands_match_single_threaded_drawing() {
+        let (w, h, stride) = (333, 301, 340);
+        let mut reference = vec![0u32; stride * h];
+        scene(&mut Canvas::new(&mut reference, w, h, stride));
+
+        let mut rec = Canvas::recording(w, h);
+        scene(&mut rec);
+        let cmds = rec.take_commands();
+        for threads in [1, 2, 3, 4, 7] {
+            let mut frame = vec![0u32; stride * h];
+            rasterize_parallel(&cmds, &mut frame, w, h, stride, threads);
+            assert!(frame == reference, "{threads} bands differ from single-threaded drawing");
         }
     }
 }
