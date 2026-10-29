@@ -1,11 +1,12 @@
 # Data licenses
 
-The application code is licensed under MPL-2.0 (see `LICENSE`). The language model files in
+The application code is licensed under GPL-3.0-or-later (see `LICENSE`). The language model files in
 `app/src/main/assets/lm/*.rlm` are derived works of the corpora below and are distributed under
 **CC BY-SA 4.0** (required by the share-alike terms of the OpenSubtitles frequency lists).
 
-They are built by `tools/dictgen` (`fetch_corpora.py`, then `build_all.py`); the exact corpus
-used for each language is listed in `tools/dictgen/sources.json`.
+They were built by `tools/dictgen` (`fetch_corpora.py`, then `build_all.py`), which lives in the
+repository history up to commit `d2d5b8f`; the exact corpus used for each language is listed in
+`tools/dictgen/sources.json` there.
 
 ## Sources
 
@@ -26,4 +27,4 @@ used for each language is listed in `tools/dictgen/sources.json`.
   context data, licensed under [CC BY 2.0 FR](https://creativecommons.org/licenses/by/2.0/fr/).
 
 - **Rynk curated lists** (`tools/dictgen/curated/`) — slang, abbreviations and canonical
-  spellings maintained in this repository, MPL-2.0.
+  spellings maintained in this repository's history.

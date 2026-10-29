@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Keyboard glyph on the yellow tile -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#151515"
+        android:pathData="M30,38h48a4,4 0,0 1,4 4v24a4,4 0,0 1,-4 4h-48a4,4 0,0 1,-4 -4v-24a4,4 0,0 1,4 -4z" />
+    <path android:fillColor="#FFDB4D"
+        android:pathData="M33,44h6v6h-6zM43,44h6v6h-6zM53,44h6v6h-6zM63,44h6v6h-6zM73,44h3v6h-3zM33,54h6v6h-6zM43,54h6v6h-6zM53,54h6v6h-6zM63,54h6v6h-6zM42,62h24v4h-24z" />
+</vector>

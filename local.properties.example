@@ -1,11 +1,7 @@
-# Example local.properties configuration for release signing
-# Copy to local.properties or set matching environment variables
-
-# sdk.dir=/path/to/Android/Sdk
-# ndk.dir=/path/to/Android/Sdk/ndk/26.3.11579264
-
-# Release Keystore (Optional - leave unset for unsigned release build)
-# rynk.release.storeFile=/path/to/release.keystore
-# rynk.release.storePassword=your_keystore_password
-# rynk.release.keyAlias=your_key_alias
-# rynk.release.keyPassword=your_key_password
+# Copy to local.properties (git-ignored).
+sdk.dir=/home/you/Android/Sdk
+# Optional release signing; without it the release APK is unsigned.
+# rynk.release.storeFile=/path/to/release.jks
+# rynk.release.storePassword=...
+# rynk.release.keyAlias=...
+# rynk.release.keyPassword=...
