@@ -5,4 +5,5 @@ pub mod fonts;
 pub mod icons;
 pub mod kbview;
 pub mod settings;
+pub mod textvis;
 pub mod theme;

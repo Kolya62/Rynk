@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Spatial touch model: each key is a 2D Gaussian around its (personally calibrated) center.
 //!
-//! Used twice, as in Yandex Keyboard's design:
+//! Used twice:
 //! * the dynamic grid picks the intended letter of a tap from geometry × next-letter probability,
 //!   while never growing a key's hit area by more than 50%;
 //! * the noisy-channel decoder scores how likely a tap sequence is for a candidate word.

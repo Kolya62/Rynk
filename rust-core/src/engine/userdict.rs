@@ -23,7 +23,10 @@ pub struct UserDict {
 impl UserDict {
     pub fn add_word(&mut self, word: &str, uses: u32) {
         let lower = word.to_lowercase();
-        if lower.chars().count() < 2 || lower.chars().count() > 40 {
+        let n = lower.chars().count();
+        // one-letter "words" of cased alphabets are noise; one Chinese character is a word
+        let caseless = lower.chars().all(|c| !c.is_ascii() && !c.is_lowercase() && !c.is_uppercase());
+        if n == 0 || n > 40 || (n < 2 && !caseless) {
             return;
         }
         let e = self.words.entry(lower).or_insert_with(|| (word.to_string(), 0));

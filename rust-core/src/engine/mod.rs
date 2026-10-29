@@ -8,6 +8,7 @@
 //! * source P(word | context): trigram/bigram corpus model with stupid backoff, merged with the
 //!   user's own words and word pairs.
 
+pub mod cjk;
 pub mod lm;
 pub mod touch;
 pub mod trie;
@@ -278,7 +279,7 @@ impl Predictor {
         let primary = correction.clone().unwrap_or_else(|| typed.to_string());
         let mut items = Vec::new();
         if correction.is_some() {
-            // the typed word stays one tap away, like Yandex's quoted original
+            // the typed word stays one tap away, quoted
             items.push(format!("«{typed}»"));
             items.push(primary);
             if let Some(a) = alts.into_iter().next() {

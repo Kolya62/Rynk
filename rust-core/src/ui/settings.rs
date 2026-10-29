@@ -138,7 +138,7 @@ impl SettingsApp {
             ui.add_space(12.0);
         }
 
-        let names: Vec<&str> = self.prefs.languages.iter().filter_map(|c| crate::layout::LangDef::by_code(c)).map(|l| l.name).collect();
+        let names: Vec<String> = self.prefs.languages.iter().filter_map(|c| crate::layout::LangDef::by_code(c)).map(|l| super::textvis::visual(l.name)).collect();
         let langs_title = self.t("Языки", "Languages").to_string();
         if ui.add_sized([ui.available_width(), 56.0], egui::Button::new(format!("{langs_title}: {}  ›", names.join(", ")))).clicked() {
             self.page = Page::Languages;
@@ -223,7 +223,7 @@ impl SettingsApp {
         order.extend(rest);
         for l in order {
             let mut on = self.prefs.languages.iter().any(|c| c == l.code);
-            let label = format!("{}   {}", l.name, RichText::new(l.code).text());
+            let label = format!("{}   {}", super::textvis::visual(l.name), l.code);
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut on, label).changed() {
                     if on {

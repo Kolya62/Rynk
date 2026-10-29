@@ -396,17 +396,28 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbTakeCommands(env: JNIEnv,
     env.new_string(s).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
 }
 
-/// Builds a model from asset bytes (background thread), then hands it to the keyboard
+/// Builds a language model (`lm/*.rlm`) or conversion dictionary (`cjk/*.rcd`) from asset bytes
+/// on a background thread, then hands it to the keyboard
 #[no_mangle]
-pub extern "system" fn Java_org_rynk_keyboard_Native_kbModel(mut env: JNIEnv, _: JClass, code: JString, data: JByteArray) {
-    let code = jstr(&mut env, &code);
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbModel(mut env: JNIEnv, _: JClass, path: JString, data: JByteArray) {
+    let path = jstr(&mut env, &path);
     let Ok(bytes) = env.convert_byte_array(&data) else { return };
+    if path.ends_with(".rcd") {
+        match crate::engine::cjk::ConvDict::decode(&bytes) {
+            Some(d) => {
+                let d = Arc::new(d);
+                with_kb(|h| h.kb.conv_loaded(&path, d));
+            }
+            None => log::error!("corrupt dictionary {path}"),
+        }
+        return;
+    }
     match Model::from_bytes(&bytes) {
         Some(m) => {
             let m = Arc::new(m);
-            with_kb(|h| h.kb.model_loaded(&code, m));
+            with_kb(|h| h.kb.model_loaded(&path, m));
         }
-        None => log::error!("corrupt language model {code}"),
+        None => log::error!("corrupt language model {path}"),
     }
 }
 

@@ -175,18 +175,18 @@ class RynkIme : InputMethodService() {
         }
     }
 
-    /** Language models are decoded on a background thread, then handed to the core */
-    private fun loadModel(code: String) {
-        if (!loading.add(code)) return
+    /** Language models and dictionaries (asset paths) are decoded on a background thread */
+    private fun loadModel(path: String) {
+        if (!loading.add(path)) return
         loader.execute {
             try {
-                val bytes = assets.open("lm/$code.rlm").use { it.readBytes() }
-                Native.kbModel(code, bytes)
+                val bytes = assets.open(path).use { it.readBytes() }
+                Native.kbModel(path, bytes)
             } catch (e: java.io.IOException) {
-                android.util.Log.w("Rynk", "no model for $code")
+                android.util.Log.w("Rynk", "missing asset $path")
             }
             main.post {
-                loading.remove(code)
+                loading.remove(path)
                 afterEvent()
             }
         }

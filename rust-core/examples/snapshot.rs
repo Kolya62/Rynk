@@ -24,6 +24,10 @@ fn main() {
         ("ru_dark", &["ru", "en"], true, ""),
         ("en_light", &["en"], false, "helo"),
         ("hi_light", &["hi"], false, ""),
+        ("zh_light", &["zh-Hans"], false, "zhongguoren"),
+        ("zhuyin_dark", &["zh-TW"], true, "ㄋㄧˇㄏㄠˇ"),
+        ("ja_light", &["ja"], false, "nihon"),
+        ("ar_light", &["ar"], false, "سلا"),
     ];
     for (name, langs, dark, typed) in shots {
         let mut p = Prefs::defaults(&[]);
@@ -32,15 +36,21 @@ fn main() {
         let h = kb.measure(W as f32, DP, 0.0) as u32;
         kb.start_input(Editor::from_android(0x4001, 3), false);
         for c in kb.take_commands() {
-            if let Cmd::LoadModel(code) = c {
-                let path = format!("{}/../app/src/main/assets/lm/{code}.rlm", env!("CARGO_MANIFEST_DIR"));
-                if let Ok(b) = std::fs::read(path) {
-                    kb.model_loaded(&code, Arc::new(Model::from_bytes(&b).unwrap()));
+            if let Cmd::LoadModel(path) = c {
+                let file = format!("{}/../app/src/main/assets/{path}", env!("CARGO_MANIFEST_DIR"));
+                let Ok(b) = std::fs::read(file) else { continue };
+                if path.ends_with(".rcd") {
+                    kb.conv_loaded(&path, Arc::new(rynk_core::engine::cjk::ConvDict::decode(&b).unwrap()));
+                } else {
+                    kb.model_loaded(&path, Arc::new(Model::from_bytes(&b).unwrap()));
                 }
             }
         }
         for ch in typed.chars() {
-            let key = kb.keys.iter().find(|k| k.label.to_lowercase() == ch.to_string()).unwrap().clone();
+            let Some(key) = kb.keys.iter().find(|k| k.label.to_lowercase() == ch.to_string()).cloned() else {
+                kb.type_text(&ch.to_string(), None);
+                continue;
+            };
             kb.touch_down(1, key.rect.cx(), key.rect.cy(), 0.0);
             kb.touch_up(1, key.rect.cx(), key.rect.cy(), 30.0);
         }

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Keyboard state machine: touches in, editor commands out. Platform independent.
 
-use crate::compose::{hangul::Hangul, kana};
+mod convert;
+
+use crate::compose::hangul::Hangul;
 use crate::emoji;
 use crate::engine::lm::Context;
 use crate::engine::touch::{KeyGeom, Tap, TouchModel};
+use crate::engine::cjk::{Conv, ConvDict};
 use crate::engine::userdict::UserDict;
 use crate::engine::{Model, Predictor, Suggestions};
 use crate::layout::{self, BuildOptions, Composer, Frame, Key, KeyKind, LangDef, Mode, ShiftState};
@@ -194,6 +197,10 @@ struct Correction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum StripItem {
     Word { text: String, primary: bool, original: bool },
+    /// A conversion candidate (Chinese, Japanese)
+    Cand { text: String, idx: usize, primary: bool },
+    /// Opens (false) or closes (true) the full candidate panel
+    Expand(bool),
     Tool(Tool),
 }
 
@@ -232,7 +239,11 @@ pub struct Keyboard {
     composing: String,
     taps: Vec<Tap>,
     hangul: Hangul,
-    romaji: String,
+    cjk_input: String,
+    pub cands: Vec<Conv>,
+    conv_sel: Option<usize>,
+    convs: HashMap<String, Arc<ConvDict>>,
+    pub cand_scroll: f32,
     ctx_before: String,
     caps_hint: bool,
     pub suggestions: Suggestions,
@@ -274,7 +285,11 @@ impl Keyboard {
             composing: String::new(),
             taps: Vec::new(),
             hangul: Hangul::default(),
-            romaji: String::new(),
+            cjk_input: String::new(),
+            cands: Vec::new(),
+            conv_sel: None,
+            convs: HashMap::new(),
+            cand_scroll: 0.0,
             ctx_before: String::new(),
             caps_hint: false,
             suggestions: Suggestions::default(),
@@ -458,31 +473,50 @@ impl Keyboard {
 
     fn request_model(&mut self) {
         self.swap_dict();
-        let lm = self.lang().lm;
-        if lm.is_empty() {
+        let lang = self.lang();
+        if !lang.conv.is_empty() {
+            let path = format!("cjk/{}.rcd", lang.conv);
+            if !self.convs.contains_key(&path) {
+                self.out.push(Cmd::LoadModel(path));
+            }
+        }
+        if lang.lm.is_empty() {
             self.predictor.set_model(None);
             return;
         }
-        match self.models.get(lm) {
+        let path = format!("lm/{}.rlm", lang.lm);
+        match self.models.get(&path) {
             Some(m) => self.predictor.set_model(Some(m.clone())),
             None => {
                 self.predictor.set_model(None);
-                self.out.push(Cmd::LoadModel(lm.to_string()));
+                self.out.push(Cmd::LoadModel(path));
             }
         }
     }
 
-    /// A model finished loading in the background
-    pub fn model_loaded(&mut self, code: &str, model: Arc<Model>) {
+    /// A language model finished loading in the background (`path` as in [`Cmd::LoadModel`])
+    pub fn model_loaded(&mut self, path: &str, model: Arc<Model>) {
         // keep at most the current and one more model in memory
+        let cur = format!("lm/{}.rlm", self.lang().lm);
         if self.models.len() >= 2 {
-            let cur = self.lang().lm;
-            self.models.retain(|k, _| k == cur);
+            self.models.retain(|k, _| *k == cur);
         }
-        self.models.insert(code.to_string(), model);
-        if self.lang().lm == code {
+        self.models.insert(path.to_string(), model);
+        if cur == path {
             self.request_model();
             self.refresh_suggestions();
+        }
+    }
+
+    /// A conversion dictionary finished loading
+    pub fn conv_loaded(&mut self, path: &str, dict: Arc<ConvDict>) {
+        let cur = format!("cjk/{}.rcd", self.lang().conv);
+        if self.convs.len() >= 2 {
+            self.convs.retain(|k, _| *k == cur);
+        }
+        self.convs.insert(path.to_string(), dict);
+        if cur == path {
+            self.refresh_cands();
         }
     }
 
@@ -528,7 +562,9 @@ impl Keyboard {
         }
         self.composing.clear();
         self.taps.clear();
-        self.romaji.clear();
+        self.cjk_input.clear();
+        self.cands.clear();
+        self.conv_sel = None;
         self.hangul = Hangul::default();
         self.suggestions = Suggestions::default();
         self.correction = None;
@@ -579,10 +615,10 @@ impl Keyboard {
     }
 
     fn composing_display(&self) -> String {
-        match self.lang().composer {
-            Composer::Kana => kana::to_hiragana(&self.romaji, false),
+        match self.composer() {
             Composer::Hangul => self.hangul.text(),
             Composer::None => self.composing.clone(),
+            _ => self.cjk_display(),
         }
     }
 
@@ -596,7 +632,7 @@ impl Keyboard {
     }
 
     fn refresh_suggestions(&mut self) {
-        if self.composing.is_empty() || !self.suggestions_enabled() || self.lang().composer != Composer::None {
+        if self.composing.is_empty() || !self.suggestions_enabled() || self.composer() != Composer::None {
             self.suggestions = Suggestions::default();
         } else {
             let ctx = self.context();
@@ -609,7 +645,7 @@ impl Keyboard {
     }
 
     fn refresh_predictions(&mut self) {
-        self.predictions = if self.suggestions_enabled() && self.composing.is_empty() && self.lang().composer == Composer::None {
+        self.predictions = if self.suggestions_enabled() && self.composing.is_empty() && self.composer() == Composer::None {
             let ctx = self.context();
             let cap = self.shift != ShiftState::Off && !self.lang().caseless;
             if ctx.prev.is_empty() {
@@ -633,8 +669,7 @@ impl Keyboard {
     /// Types the text of a key (or popup choice); `pos` is the touch for letters
     pub fn type_text(&mut self, text: &str, pos: Option<(f32, f32)>) {
         self.correction = None;
-        let lang = self.lang();
-        match lang.composer {
+        match self.composer() {
             Composer::Hangul => {
                 let mut c = text.chars();
                 if let (Some(ch), None) = (c.next(), c.clone().next()) {
@@ -653,30 +688,32 @@ impl Keyboard {
                 self.after_separator(text);
                 return;
             }
-            Composer::Kana => {
-                if text.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '\'') {
-                    self.romaji.push_str(&text.to_lowercase());
-                    self.set_composing();
-                    self.after_letter();
-                    return;
-                }
-                let done = kana::to_hiragana(&self.romaji, true);
-                self.romaji.clear();
-                let sep = match text {
-                    "," => "、",
-                    "." => "。",
-                    t => t,
-                };
-                self.commit(&(done + sep));
-                self.after_separator(text);
+            c if c.converts() && self.composer() == c => {
+                self.cjk_type(text);
+                self.after_letter();
                 return;
             }
-            Composer::None => {}
+            _ => {}
+
         }
 
         if Self::is_word_char(text) && !(text == "-" && self.composing.is_empty()) && !(text == "'" && self.composing.is_empty()) {
             // a letter or digit continues the word
             self.auto_space = false;
+            if self.lang().code == "vi" && !self.composing.is_empty() {
+                let mut cs = text.chars();
+                if let (Some(key), None) = (cs.next(), cs.next()) {
+                    if let Some(word) = crate::compose::telex::apply(&self.composing, key) {
+                        // Telex rewrote the word: its letters are now exact, not touches
+                        self.composing = word;
+                        self.taps = self.composing.to_lowercase().chars().map(|ch| Tap { ch, pos: None }).collect();
+                        self.set_composing();
+                        self.after_letter();
+                        self.refresh_suggestions();
+                        return;
+                    }
+                }
+            }
             self.composing.push_str(text);
             let lower = text.to_lowercase();
             let ch = lower.chars().next().unwrap_or(' ');
@@ -726,7 +763,7 @@ impl Keyboard {
 
     /// Commits the word being composed, applying autocorrection when allowed, plus `sep`
     fn finish_word(&mut self, allow_correction: bool, sep: &str) {
-        match self.lang().composer {
+        match self.composer() {
             Composer::Hangul => {
                 let t = self.hangul.finish() + sep;
                 if !t.is_empty() {
@@ -734,15 +771,15 @@ impl Keyboard {
                 }
                 return;
             }
-            Composer::Kana => {
-                let t = kana::to_hiragana(&self.romaji, true) + sep;
-                self.romaji.clear();
-                if !t.is_empty() {
-                    self.commit(&t);
+            c if c.converts() => {
+                self.cjk_commit_all();
+                if !sep.is_empty() {
+                    self.commit(sep);
                 }
                 return;
             }
-            Composer::None => {}
+            _ => {}
+
         }
         if self.composing.is_empty() {
             if !sep.is_empty() {
@@ -777,14 +814,13 @@ impl Keyboard {
 
     pub fn space(&mut self, t: f64) {
         let lang = self.lang();
-        let had_word = !self.composing.is_empty() || !self.romaji.is_empty() || !self.hangul.is_empty();
+        if self.cjk_active() {
+            self.cjk_space();
+            return;
+        }
+        let had_word = !self.composing.is_empty() || !self.hangul.is_empty();
         if had_word {
-            if lang.composer == Composer::Kana {
-                self.finish_word(false, "");
-                self.commit(" ");
-            } else {
-                self.finish_word(true, " ");
-            }
+            self.finish_word(true, " ");
             self.auto_space = true;
             self.last_space_t = t;
         } else if self.prefs.double_space_period
@@ -815,17 +851,15 @@ impl Keyboard {
 
     pub fn backspace(&mut self) {
         self.static_grid_next = true;
-        match self.lang().composer {
+        match self.composer() {
             Composer::Hangul if !self.hangul.is_empty() => {
                 self.hangul.backspace();
                 self.set_composing();
                 self.dirty = true;
                 return;
             }
-            Composer::Kana if !self.romaji.is_empty() => {
-                self.romaji.pop();
-                self.set_composing();
-                self.dirty = true;
+            c if c.converts() && !self.cjk_input.is_empty() => {
+                self.cjk_backspace();
                 return;
             }
             _ => {}
@@ -902,6 +936,10 @@ impl Keyboard {
     }
 
     pub fn enter(&mut self) {
+        if self.cjk_active() {
+            self.cjk_enter();
+            return;
+        }
         self.finish_word(true, "");
         if self.editor.action == EnterAction::Newline || self.editor.multi_line && self.editor.action == EnterAction::Newline {
             self.commit("\n");
@@ -926,14 +964,9 @@ impl Keyboard {
                 Tool::SwitchIme => self.emit(Cmd::SwitchIme),
                 Tool::Hide => self.emit(Cmd::Hide),
             },
+            StripItem::Cand { idx, .. } => self.cjk_pick(idx),
+            StripItem::Expand(_) => self.toggle_cand_panel(),
             StripItem::Word { text, original, .. } => {
-                let lang = self.lang();
-                if lang.composer == Composer::Kana {
-                    self.romaji.clear();
-                    self.commit(&text);
-                    self.after_separator(" ");
-                    return;
-                }
                 let prev = self.context().prev.first().cloned();
                 let typed = std::mem::take(&mut self.composing);
                 self.taps.clear();
@@ -956,16 +989,21 @@ impl Keyboard {
 
     /// Cells of the strip above the keys
     pub fn strip_items(&self) -> Vec<StripItem> {
-        let lang = self.lang();
-        if lang.composer == Composer::Kana && !self.romaji.is_empty() {
-            let h = kana::to_hiragana(&self.romaji, true);
-            let k = kana::to_katakana(&h);
-            return vec![
-                StripItem::Word { text: self.romaji.clone(), primary: false, original: false },
-                StripItem::Word { text: h, primary: true, original: false },
-                StripItem::Word { text: k, primary: false, original: false },
-            ];
+        self.strip_layout().into_iter().map(|c| c.0).collect()
+    }
+
+    /// Strip cells with their horizontal extent in px
+    pub fn strip_layout(&self) -> Vec<(StripItem, f32, f32)> {
+        if self.cjk_active() {
+            return self.cand_strip();
         }
+        let items = self.strip_words();
+        let n = items.len().max(1) as f32;
+        let w = self.width / n;
+        items.into_iter().enumerate().map(|(i, it)| (it, i as f32 * w, (i + 1) as f32 * w)).collect()
+    }
+
+    fn strip_words(&self) -> Vec<StripItem> {
         if !self.composing.is_empty() && !self.suggestions.items.is_empty() {
             let primary = self.suggestions.items.len() / 2;
             let primary = if self.suggestions.items.len() == 1 { 0 } else { primary.max(1).min(self.suggestions.items.len() - 1) };
@@ -1069,8 +1107,8 @@ impl Keyboard {
     }
 
     fn strip_cell_at(&self, x: f32) -> usize {
-        let n = self.strip_items().len().max(1);
-        ((x / self.width * n as f32) as usize).min(n - 1)
+        let cells = self.strip_layout();
+        cells.iter().position(|c| x >= c.1 && x < c.2).unwrap_or(cells.len().saturating_sub(1))
     }
 
     pub fn emoji_area(&self) -> (f32, f32) {
@@ -1113,6 +1151,8 @@ impl Keyboard {
         };
         if y < self.strip_h {
             p.strip = Some(self.strip_cell_at(x));
+        } else if self.mode == Mode::Candidates {
+            p.emoji = true;
         } else if self.mode == Mode::Emoji {
             let (_, bottom) = self.emoji_area();
             if y < bottom {
@@ -1145,6 +1185,15 @@ impl Keyboard {
         self.pointers[i].y = y;
         let p = self.pointers[i].clone();
         if p.done {
+            return;
+        }
+        if p.emoji && self.mode == Mode::Candidates {
+            self.cand_scroll = (self.cand_scroll - (y - p.y0)).max(0.0);
+            self.pointers[i].y0 = y;
+            if (y - p.y0).abs() > 2.0 * self.dp {
+                self.pointers[i].space_drag = true;
+            }
+            self.dirty = true;
             return;
         }
         if p.emoji {
@@ -1234,6 +1283,12 @@ impl Keyboard {
             if y < self.strip_h + 20.0 * self.dp && self.strip_cell_at(x) == c {
                 self.pick_strip(c);
             }
+        } else if p.emoji && self.mode == Mode::Candidates {
+            if !p.space_drag {
+                if let Some((idx, _)) = self.cand_panel().into_iter().find(|(_, r)| r.contains(x, y)) {
+                    self.cjk_pick(idx);
+                }
+            }
         } else if p.emoji {
             if !p.space_drag {
                 self.tap_emoji(x, y);
@@ -1277,7 +1332,7 @@ impl Keyboard {
                 let mut with_pos = None;
                 if key.letter && self.mode == Mode::Alphabet {
                     with_pos = Some(pos);
-                    if self.prefs.dynamic_grid && !self.static_grid_next && self.predictor.model.is_some() && self.lang().composer == Composer::None {
+                    if self.prefs.dynamic_grid && !self.static_grid_next && self.predictor.model.is_some() && self.composer() == Composer::None {
                         let prefix = self.composing.to_lowercase();
                         let next = self.predictor.next_letters(&prefix);
                         if let Some(c) = self.touch.resolve(pos.0, pos.1, &next) {
@@ -1401,7 +1456,7 @@ impl Keyboard {
                 if t >= r {
                     let n = self.pointers[i].repeats + 1;
                     self.pointers[i].repeats = n;
-                    // after a while, delete whole words: like Yandex's accelerating backspace
+                    // after a while, delete whole words (accelerating backspace)
                     if n > 18 && self.composing.is_empty() {
                         self.delete_words(1);
                         self.pointers[i].next_repeat = Some(t + REPEAT_MS * 3.0);
@@ -1432,7 +1487,7 @@ impl Keyboard {
             ),
             KeyKind::Char(_) if !key.popup.is_empty() => {
                 let mut items = key.popup.clone();
-                // the comma's long-press also leads to emoji, like on Yandex
+                // the comma's long-press also leads to emoji
                 if key.func && key.label == "," {
                     items.insert(0, "🙂".into());
                 }
@@ -1564,6 +1619,7 @@ pub fn context_of(before: &str) -> Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::cjk::ConvDict;
     use crate::engine::Model;
 
     fn kb(langs: &[&str]) -> Keyboard {
@@ -1574,15 +1630,23 @@ mod tests {
         k.measure(1080.0, 2.75, 0.0);
         k.start_input(Editor::from_android(0x1 | 0x4000, 6), false);
         let cmds = k.take_commands();
+        load(&mut k, cmds);
+        k
+    }
+
+    /// Loads the assets a command list asks for
+    fn load(k: &mut Keyboard, cmds: Vec<Cmd>) {
         for c in cmds {
-            if let Cmd::LoadModel(code) = c {
-                let path = format!("{}/../app/src/main/assets/lm/{code}.rlm", env!("CARGO_MANIFEST_DIR"));
-                if let Ok(b) = std::fs::read(path) {
-                    k.model_loaded(&code, Arc::new(Model::from_bytes(&b).unwrap()));
+            if let Cmd::LoadModel(path) = c {
+                let file = format!("{}/../app/src/main/assets/{path}", env!("CARGO_MANIFEST_DIR"));
+                let Ok(b) = std::fs::read(file) else { continue };
+                if path.ends_with(".rcd") {
+                    k.conv_loaded(&path, Arc::new(ConvDict::decode(&b).unwrap()));
+                } else {
+                    k.model_loaded(&path, Arc::new(Model::from_bytes(&b).unwrap()));
                 }
             }
         }
-        k
     }
 
     /// Taps the center of the key labelled `label` (case-insensitive)
@@ -1737,10 +1801,73 @@ mod tests {
         let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
         type_str(&mut k, "ㅎㅏㄴ ", &mut text, &mut comp, &mut t);
         assert_eq!(text, "한 ");
+    }
+
+    #[test]
+    fn japanese_converts_with_space_and_confirms_with_enter() {
         let mut k = kb(&["ja"]);
         let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
-        type_str(&mut k, "sushi ", &mut text, &mut comp, &mut t);
-        assert_eq!(text, "すし ");
+        type_str(&mut k, "nihon", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "にほn", "a trailing n may still become な");
+        type_str(&mut k, " ", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "日本", "space shows the first conversion");
+        tap_kind(&mut k, KeyKind::Enter, &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "日本");
+        assert!(comp.is_none());
+        type_str(&mut k, "tabeta ", &mut text, &mut comp, &mut t);
+        tap_kind(&mut k, KeyKind::Enter, &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "日本食べた");
+    }
+
+    #[test]
+    fn chinese_pinyin_zhuyin_and_cantonese() {
+        let mut k = kb(&["zh-Hans"]);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        type_str(&mut k, "nihao ", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "你好");
+        tap_kind(&mut k, KeyKind::Char("，".into()), &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "你好，");
+        type_str(&mut k, "zhongguoren", &mut text, &mut comp, &mut t);
+        assert!(matches!(&k.strip_items()[0], StripItem::Cand { text, .. } if text == "中国人"), "{:?}", k.strip_items());
+        // picking a shorter candidate keeps the rest of the input
+        let idx = k.cands.iter().position(|c| c.text == "中国").unwrap();
+        k.cjk_pick(idx);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "你好，中国ren");
+        type_str(&mut k, " ", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "你好，中国人");
+
+        let mut k = kb(&["zh-TW"]);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        type_str(&mut k, "ㄋㄧˇㄏㄠˇ ", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "你好");
+
+        let mut k = kb(&["yue"]);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        type_str(&mut k, "mgoi ", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "唔該");
+    }
+
+    #[test]
+    fn vietnamese_telex_on_the_keyboard() {
+        let mut k = kb(&["vi"]);
+        k.prefs.autocorrect = false;
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        type_str(&mut k, "tieengs vieetj ", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "Tiếng việt ");
+    }
+
+    #[test]
+    fn conversion_is_off_in_password_fields() {
+        let mut k = kb(&["zh-Hans"]);
+        k.start_input(Editor::from_android(0x81, 6), false);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        type_str(&mut k, "abc", &mut text, &mut comp, &mut t);
+        assert!(k.cands.is_empty());
+        assert_eq!(text, "abc");
     }
 
     #[test]

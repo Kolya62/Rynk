@@ -8,7 +8,21 @@ pub use languages::LANGUAGES;
 pub enum Composer {
     None,
     Hangul,
+    /// Romaji → kana, then kana → kanji conversion
     Kana,
+    /// Pinyin letters → Chinese characters
+    Pinyin,
+    /// Bopomofo → Chinese characters
+    Zhuyin,
+    /// Jyutping letters → Cantonese characters
+    Jyutping,
+}
+
+impl Composer {
+    /// Composers that convert a reading through a dictionary
+    pub fn converts(self) -> bool {
+        matches!(self, Composer::Kana | Composer::Pinyin | Composer::Zhuyin | Composer::Jyutping)
+    }
 }
 
 #[derive(Debug)]
@@ -29,6 +43,8 @@ pub struct LangDef {
     /// Turkish/Azerbaijani dotted and dotless i
     pub turkic: bool,
     pub currency: &'static str,
+    /// Conversion dictionary asset `cjk/<conv>.rcd`, empty when none
+    pub conv: &'static str,
 }
 
 impl LangDef {
@@ -66,6 +82,19 @@ impl LangDef {
         let tag = tag.replace('_', "-");
         let parts: Vec<&str> = tag.split('-').collect();
         let lang = parts.first()?.to_lowercase();
+        if lang == "zh" {
+            let rest: Vec<String> = parts[1..].iter().map(|p| p.to_uppercase()).collect();
+            let code = if rest.iter().any(|p| p == "TW") {
+                "zh-TW"
+            } else if rest.iter().any(|p| p == "HK" || p == "MO") {
+                "yue"
+            } else if rest.iter().any(|p| p == "HANT") {
+                "zh-Hant"
+            } else {
+                "zh-Hans"
+            };
+            return LangDef::by_code(code);
+        }
         let lang = match lang.as_str() {
             "nb" | "nn" => "no".to_string(),
             "fil" => "tl".to_string(),
@@ -148,6 +177,8 @@ pub enum Mode {
     Symbols,
     Symbols2,
     Emoji,
+    /// The full list of conversion candidates over the key area
+    Candidates,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,7 +242,7 @@ pub fn build(o: &BuildOptions, f: Frame) -> Vec<Key> {
         Mode::Alphabet => alphabet_rows(o, &mut rows),
         Mode::Symbols => symbol_rows(o, &mut rows, false),
         Mode::Symbols2 => symbol_rows(o, &mut rows, true),
-        Mode::Emoji => return Vec::new(),
+        Mode::Emoji | Mode::Candidates => return Vec::new(),
     }
     rows.push(bottom_row(o));
     place(rows, f)
@@ -244,7 +275,7 @@ fn alphabet_rows(o: &BuildOptions, rows: &mut Vec<Row>) {
                 let mut k = ch(&shown, &shown);
                 k.letter = true;
                 let mut popup: Vec<String> = Vec::new();
-                // top row carries the digits as hints, like Yandex
+                // top row carries the digits as hints
                 if ri == 0 && !o.number_row && r.len() >= 10 && ci < 10 {
                     k.hint = Some(DIGITS[ci].to_string());
                     popup.push(DIGITS[ci].to_string());
@@ -347,8 +378,11 @@ fn bottom_row(o: &BuildOptions) -> Row {
     } else {
         (",", &[";", ":", "-", "\"", "(", ")", "'"])
     };
+    let plain = !o.email && !o.url;
     let comma = match o.lang.script {
-        "Arabic" if !o.email && !o.url => "،",
+        "Arabic" if plain => "،",
+        "CJK" if plain && o.lang.code == "ja" => "、",
+        "CJK" if plain && o.lang.composer != Composer::Hangul => "，",
         _ => comma,
     };
     let mut c = ch(comma, comma);
@@ -366,7 +400,7 @@ fn bottom_row(o: &BuildOptions) -> Row {
         "Devanagari" | "Bengali" | "Gurmukhi" | "Oriya" if !o.email && !o.url => "।",
         "Ethiopic" => "።",
         "Myanmar" => "။",
-        "CJK" if o.lang.code == "ja" => "。",
+        "CJK" if !o.email && !o.url && o.lang.composer != Composer::Hangul => "。",
         _ => ".",
     };
     let mut p = ch(period, period);
@@ -454,6 +488,29 @@ mod tests {
         assert!(LANGUAGES.len() > 100);
     }
 
+    /// Every language's model and dictionary decode, and the model's words are typeable
+    #[test]
+    fn every_model_loads() {
+        let dir = format!("{}/../app/src/main/assets", env!("CARGO_MANIFEST_DIR"));
+        let mut done = std::collections::HashSet::new();
+        for l in LANGUAGES {
+            if !l.lm.is_empty() && done.insert(l.lm) {
+                let b = std::fs::read(format!("{dir}/lm/{}.rlm", l.lm)).unwrap();
+                let m = crate::engine::lm::LanguageModel::decode(&b).unwrap_or_else(|| panic!("{}", l.lm));
+                // scripts without spaces between words, and Kurmanji (no Latin-script corpus),
+                // only carry a short curated list
+                let min = if matches!(l.script, "Thai" | "Khmer" | "Myanmar") || l.code == "ku" { 100 } else { 1000 };
+                assert!(m.words.len() > min, "{} has {} words", l.lm, m.words.len());
+            }
+            if !l.conv.is_empty() && done.insert(l.conv) {
+                let b = std::fs::read(format!("{dir}/cjk/{}.rcd", l.conv)).unwrap();
+                assert!(crate::engine::cjk::ConvDict::decode(&b).unwrap().len() > 50_000, "{}", l.conv);
+            }
+        }
+        let without: Vec<&str> = LANGUAGES.iter().filter(|l| l.lm.is_empty() && l.conv.is_empty()).map(|l| l.code).collect();
+        assert!(without.len() <= 4, "{without:?}");
+    }
+
     #[test]
     fn locale_matching() {
         assert_eq!(LangDef::for_locale("ru_RU").unwrap().code, "ru");
@@ -462,6 +519,10 @@ mod tests {
         assert_eq!(LangDef::for_locale("sr-Latn-RS").unwrap().code, "sr-Latn");
         assert_eq!(LangDef::for_locale("de-AT").unwrap().code, "de");
         assert!(LangDef::for_locale("xx").is_none());
+        assert_eq!(LangDef::for_locale("zh-CN").unwrap().code, "zh-Hans");
+        assert_eq!(LangDef::for_locale("zh-Hant-TW").unwrap().code, "zh-TW");
+        assert_eq!(LangDef::for_locale("zh-HK").unwrap().code, "yue");
+        assert_eq!(LangDef::for_locale("zh").unwrap().code, "zh-Hans");
     }
 
     #[test]

@@ -21,6 +21,7 @@ impl P<'_> {
 
     /// Text that fits a width: shrinks the font until it does
     fn text_fit(&self, c: Pos2, s: &str, size: f32, max_w: f32, col: Color32) {
+        let s = &super::textvis::visual(s);
         let mut size = size;
         for _ in 0..6 {
             let g = self.p.layout_no_wrap(s.to_string(), FontId::proportional(size), col);
@@ -53,6 +54,8 @@ pub fn paint(kb: &Keyboard, painter: &Painter, pal: Palette) {
     paint_strip(kb, &g);
     if kb.mode == Mode::Emoji {
         paint_emoji(kb, &g);
+    } else if kb.mode == Mode::Candidates {
+        paint_cand_panel(kb, &g);
     } else {
         paint_keys(kb, &g);
     }
@@ -60,14 +63,14 @@ pub fn paint(kb: &Keyboard, painter: &Painter, pal: Palette) {
 }
 
 fn paint_strip(kb: &Keyboard, g: &P) {
-    let items = kb.strip_items();
+    let cells = kb.strip_layout();
     let h = kb.strip_h / g.dp;
-    let w = kb.width / g.dp;
-    let n = items.len().max(1);
-    let cell = w / n as f32;
-    let words = items.iter().any(|i| matches!(i, StripItem::Word { .. }));
-    for (i, item) in items.iter().enumerate() {
-        let c = pos2(cell * (i as f32 + 0.5), h / 2.0);
+    let words = cells.iter().any(|c| matches!(c.0, StripItem::Word { .. } | StripItem::Cand { .. }));
+    let n = cells.len();
+    for (i, (item, x0, x1)) in cells.iter().enumerate() {
+        let (x0, x1) = (x0 / g.dp, x1 / g.dp);
+        let cell = x1 - x0;
+        let c = pos2((x0 + x1) / 2.0, h / 2.0);
         match item {
             StripItem::Word { text, primary, original } => {
                 let col = if *primary { g.pal.strip_primary } else { g.pal.strip_text };
@@ -78,9 +81,20 @@ fn paint_strip(kb: &Keyboard, g: &P) {
                 } else {
                     g.text_fit(c, text, 17.0, cell - 12.0, col);
                 }
-                if i + 1 < items.len() && words {
-                    let x = cell * (i as f32 + 1.0);
-                    g.p.line_segment([pos2(x, h * 0.28), pos2(x, h * 0.72)], Stroke::new(1.0, g.pal.divider));
+            }
+            StripItem::Cand { text, primary, .. } => {
+                if *primary {
+                    g.text_bold(c, text, 19.0, cell - 8.0, g.pal.strip_primary);
+                } else {
+                    g.text_fit(c, text, 19.0, cell - 8.0, g.pal.strip_text);
+                }
+            }
+            StripItem::Expand(open) => {
+                let col = g.pal.strip_text;
+                if *open {
+                    icons::chevron_up(g.p, c, 24.0, col);
+                } else {
+                    icons::chevron_down(g.p, c, 24.0, col);
                 }
             }
             StripItem::Tool(t) => {
@@ -95,6 +109,26 @@ fn paint_strip(kb: &Keyboard, g: &P) {
                 }
             }
         }
+        if words && i + 1 < n {
+            g.p.line_segment([pos2(x1, h * 0.28), pos2(x1, h * 0.72)], Stroke::new(1.0, g.pal.divider));
+        }
+    }
+}
+
+fn paint_cand_panel(kb: &Keyboard, g: &P) {
+    let top = kb.strip_h / g.dp;
+    let bottom = (kb.height - kb.bottom_inset) / g.dp;
+    let clip = Rect::from_min_max(pos2(0.0, top), pos2(kb.width / g.dp, bottom));
+    let p = g.p.with_clip_rect(clip);
+    for (i, r) in kb.cand_panel() {
+        let r = g.r(&r);
+        if r.bottom() < top || r.top() > bottom {
+            continue;
+        }
+        p.rect_stroke(r, 0.0, Stroke::new(0.5, g.pal.divider), egui::StrokeKind::Inside);
+        let text = &kb.cands[i].text;
+        let gal = p.layout_no_wrap(text.clone(), FontId::proportional(20.0), g.pal.text);
+        p.galley(r.center() - gal.size() / 2.0, gal, g.pal.text);
     }
 }
 
@@ -210,7 +244,7 @@ fn paint_overlays(kb: &Keyboard, g: &P) {
     if !kb.prefs.key_preview {
         return;
     }
-    // Yandex-style magnified preview above a pressed character key
+    // magnified preview above a pressed character key
     for &i in &kb.pressed {
         let Some(key) = kb.keys.get(i) else { continue };
         if !matches!(key.kind, KeyKind::Char(_)) || key.func {

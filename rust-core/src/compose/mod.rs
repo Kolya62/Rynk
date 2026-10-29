@@ -3,3 +3,5 @@
 
 pub mod hangul;
 pub mod kana;
+pub mod telex;
+pub mod zhuyin;

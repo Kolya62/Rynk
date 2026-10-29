@@ -163,3 +163,8 @@ pub fn chevron_down(p: &Painter, c: Pos2, s: f32, col: Color32) {
     let w = s * 0.32;
     path(p, vec![pos2(c.x - w, c.y - w * 0.4), pos2(c.x, c.y + w * 0.45), pos2(c.x + w, c.y - w * 0.4)], false, stroke(s, col));
 }
+
+pub fn chevron_up(p: &Painter, c: Pos2, s: f32, col: Color32) {
+    let w = s * 0.32;
+    path(p, vec![pos2(c.x - w, c.y + w * 0.4), pos2(c.x, c.y - w * 0.45), pos2(c.x + w, c.y + w * 0.4)], false, stroke(s, col));
+}

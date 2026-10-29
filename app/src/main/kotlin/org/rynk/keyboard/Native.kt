@@ -26,7 +26,7 @@ object Native {
     external fun kbRender()
     external fun kbNeedsRender(): Boolean
     external fun kbTakeCommands(): String
-    external fun kbModel(code: String, data: ByteArray)
+    external fun kbModel(path: String, data: ByteArray)
 
     // settings screen
     external fun stInit(filesDir: String, locales: String, night: Boolean)

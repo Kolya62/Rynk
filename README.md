@@ -1,80 +1,92 @@
 # Rynk
 
-Клавиатура для Android в стиле Яндекс Клавиатуры: та же раскладка и внешний вид, автозамена по принципу
-«шумного канала» с динамической сеткой клавиш. Ядро и весь интерфейс написаны на Rust, интерфейс рисуется
-egui через Vulkan (wgpu). Kotlin только связывает ядро с системой. Всё работает на устройстве, без сети.
+An Android keyboard with on-device autocorrect for 117 layouts. The core and the whole interface
+are written in Rust; the UI is drawn with [egui](https://github.com/emilk/egui) on Vulkan through
+[wgpu](https://wgpu.rs). Kotlin only connects the core to Android. Nothing leaves the device.
 
-Лицензия: GPL-3.0-or-later. Языковые модели: CC BY-SA 4.0, см. [DATA_LICENSES.md](DATA_LICENSES.md).
+License: GPL-3.0-or-later. Dictionaries and language models: CC BY-SA 4.0, see
+[DATA_LICENSES.md](DATA_LICENSES.md).
 
-## Возможности
+## Features
 
-- **113 раскладок**: латиница, кириллица, греческий, армянский, грузинский, иврит, арабская письменность,
-  индийские письменности (InScript с вторым слоем по Shift), сингальский, тайский, лаосский, кхмерский,
-  бирманский, эфиопский, корейский (сборка слогов хангыль), японский (ромадзи → кана).
-- **Языки по умолчанию**: языки системы, для которых есть раскладка, плюс английский. Список меняется в настройках.
-- **Вид как у Яндекс Клавиатуры**: белые клавиши с тенью, цифры в углах верхнего ряда, жёлтая кнопка
-  действия, лупа над нажатой клавишей, варианты по долгому нажатию (подсказка «ъ» на «ь», «ё» на «е»),
-  светлая и тёмная темы.
-- **Ввод**: подсказки слов и следующего слова, двойной пробел ставит точку, лишний пробел перед знаком
-  препинания убирается, заглавная в начале предложения, курсор свайпом по пробелу, удаление слов свайпом
-  по Backspace, ускоряющийся повтор Backspace, эмодзи.
+- **117 layouts.** Latin, Cyrillic, Greek, Armenian, Georgian, Hebrew, Arabic script, Indic
+  scripts (InScript with a Shift layer), Sinhala, Thai, Lao, Khmer, Myanmar, Ethiopic, Korean.
+- **Chinese.** Pinyin with simplified or traditional characters, Zhuyin (bopomofo) for Taiwan and
+  Jyutping for Cantonese. Whole phrases convert at once ("zhongguoren" → 中国人); a shorter
+  candidate keeps the rest of the input.
+- **Japanese.** Romaji → kana → kanji, including inflected verbs and adjectives (たべた → 食べた).
+  Space walks through candidates, Enter confirms.
+- **Vietnamese Telex** (aa → â, ow → ơ, dd → đ, tones s f r x j).
+- **Default languages** are the system languages that have a layout, plus English.
+- **Typing aids.** Word suggestions and next-word predictions, double-space period, smart spacing
+  around punctuation, auto-capitalization, cursor control by swiping the space bar, word deletion
+  by swiping Backspace, accelerating Backspace repeat, long-press variants with a corner hint
+  ("ъ" on "ь", "ё" on "е"), emoji, light and dark themes.
+- **Complex scripts in the strip.** Arabic letters are joined, right-to-left text is reordered and
+  Indic pre-base vowel signs are placed correctly, since egui has no shaping engine.
 
-## Как устроена автозамена
+## Autocorrect
 
-Основа — модель шумного канала, которую Яндекс описывал в статьях о Клавиатуре:
+A noisy-channel model:
 
 ```
-P(слово | касания, контекст) ∝ P(касания | слово) · P(слово | контекст)
+P(word | touches, context) ∝ P(touches | word) · P(word | context)
 ```
 
-1. **Модель касаний.** Каждая клавиша — двумерный гауссиан вокруг центра. Центры подстраиваются под
-   пользователя по словам, которые он принял.
-2. **Динамическая сетка.** Буква касания выбирается по геометрии, умноженной на вероятность следующей
-   буквы из словаря. Хитбокс клавиши растёт не больше чем на 50%, после Backspace сетка статическая.
-3. **Поиск кандидатов.** Обход префиксного дерева словаря со стоимостью каждого касания и правками:
-   лишнее касание, пропущенная буква, перестановка соседних (удвоенные буквы дешевле).
-4. **Языковая модель.** Триграммы и биграммы корпуса со «stupid backoff» плюс личные слова и пары слов.
-5. **Решение.** Слово заменяется по пробелу или знаку препинания. Известное словарю слово заменяется
-   только при большом перевесе. Backspace сразу после замены возвращает набранное, и это слово больше
-   не исправляется.
+1. **Touch model.** Each key is a 2D Gaussian around its center. Centers adapt to the user from
+   the words they accept.
+2. **Dynamic key grid.** The letter of a touch is chosen from geometry times the probability of
+   the next letter in the dictionary. A key's hit area grows by at most 50%, and the grid is
+   static right after Backspace.
+3. **Candidate search.** A trie walk that prices every touch and allows an extra touch, a missed
+   letter and swapped neighbours (doubled letters cost less).
+4. **Language model.** Corpus trigrams and bigrams with stupid backoff, merged with the user's own
+   words and word pairs.
+5. **Decision.** A word is replaced on space or punctuation. A word the dictionary knows is only
+   replaced by a much more likely one. Backspace right after a replacement restores the typed word
+   and stops correcting it.
 
-## Сборка
+## Building
 
-Нужны Rust с целями `aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android`,
-[cargo-ndk](https://github.com/bbqsrc/cargo-ndk), Android SDK 35 и NDK 26.3.11579264.
+Requires Rust with the `aarch64-linux-android`, `armv7-linux-androideabi` and
+`x86_64-linux-android` targets, [cargo-ndk](https://github.com/bbqsrc/cargo-ndk), Android SDK 35
+and NDK 26.3.11579264.
 
 ```bash
 ./gradlew assembleRelease
 ```
 
-Gradle сам собирает Rust-ядро под arm64-v8a, armeabi-v7a и x86_64. Release-сборка сжимает код,
-ресурсы, нативные библиотеки и языковые модели. Подпись берётся из `local.properties` или переменных
-окружения (см. `local.properties.example`), без неё APK не подписан.
+Gradle builds the Rust core for arm64-v8a, armeabi-v7a and x86_64. The release build shrinks code
+and resources and compresses native libraries and dictionaries. Signing keys come from
+`local.properties` or environment variables (see `local.properties.example`); without them the
+APK is unsigned.
 
 ```bash
 cargo test --release -p rynk_core
 cargo run --release -p rynk_core --example snapshot -- /tmp/shots
 ```
 
-Тесты проверяют автозамену на настоящей русской модели, раскладки всех языков и сценарии набора.
-Пример `snapshot` рисует клавиатуру через Vulkan в PNG без телефона.
+The tests check autocorrect on the real Russian model, conversion for Chinese, Cantonese and
+Japanese, every layout and model, and typing scenarios end to end. `snapshot` renders the keyboard
+offscreen with Vulkan to PNG files, no phone needed.
 
-Раскладки генерируются скриптом: `python3 -I tools/gen_layouts.py`.
+Generators: `tools/gen_layouts.py` (layouts), `tools/lmgen.py` (word models),
+`tools/cjkgen.py` (Chinese and Japanese dictionaries).
 
-## Структура
+## Layout of the code
 
-| Путь | Что там |
+| Path | Contents |
 |---|---|
-| `rust-core/src/engine` | языковая модель, префиксное дерево, модель касаний, декодер, личный словарь |
-| `rust-core/src/layout` | языки и геометрия клавиш |
-| `rust-core/src/keyboard.rs` | состояние клавиатуры: касания на входе, команды редактору на выходе |
-| `rust-core/src/ui` | отрисовка клавиатуры и экран настроек на egui |
-| `rust-core/src/gfx.rs`, `android.rs` | Vulkan через wgpu, JNI |
-| `app/src/main/kotlin` | сервис ввода, Surface, InputConnection |
+| `rust-core/src/engine` | language model, trie, touch model, decoder, CJK conversion, personal dictionary |
+| `rust-core/src/compose` | Hangul, kana, zhuyin and Telex composers |
+| `rust-core/src/layout` | languages and key geometry |
+| `rust-core/src/keyboard.rs` | keyboard state: touches in, editor commands out |
+| `rust-core/src/ui` | keyboard painting and the settings screen in egui |
+| `rust-core/src/gfx.rs`, `android.rs` | Vulkan through wgpu, JNI |
+| `app/src/main/kotlin` | input method service, Surface, InputConnection |
 
-## Ограничения
+## Known limitations
 
-- Китайский не поддерживается: для пиньинь нужен словарь чтений, его пока нет.
-- Японский набирается каной, без преобразования в кандзи.
-- egui не умеет сложное начертание (shaping): на клавишах это незаметно, в полосе подсказок
-  арабские и индийские слова видны без лигатур. В поле ввода текст отображает само приложение.
+- Scottish Gaelic and Lao have no word model; Kurmanji, Thai, Khmer and Myanmar only a short list.
+- Japanese conversion works on words and stems, without a full morphological analyzer.
+- egui does not form Indic conjuncts; in the editor the app renders text itself.

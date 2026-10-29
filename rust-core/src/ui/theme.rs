@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Colors close to Yandex Keyboard's light and dark themes.
+//! Light and dark color themes.
 
 use egui::Color32;
 
@@ -24,7 +24,7 @@ pub struct Palette {
     pub popup_sel_text: Color32,
 }
 
-/// Yandex yellow
+/// Accent yellow
 const YELLOW: Color32 = Color32::from_rgb(0xFF, 0xDB, 0x4D);
 
 pub const LIGHT: Palette = Palette {
