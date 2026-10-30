@@ -465,6 +465,8 @@ impl Keyboard {
             url: self.editor.url,
         };
         self.keys = layout::build(&o, self.key_frame());
+        // Lowercase labels give the exact letters (Turkic ı/i); with Shift on, lowercased capitals
+        // still make a usable model when there is none yet (a field that starts capitalized)
         if self.mode == Mode::Alphabet && self.shift == ShiftState::Off {
             self.rebuild_touch_model();
         }
@@ -480,7 +482,8 @@ impl Keyboard {
             .iter()
             .filter(|k| k.letter)
             .filter_map(|k| {
-                let mut c = k.label.chars();
+                let lower = k.label.to_lowercase();
+                let mut c = lower.chars();
                 let ch = c.next()?;
                 c.next().is_none().then(|| KeyGeom { ch, cx: k.rect.cx(), cy: k.rect.cy(), w: k.rect.w, h: k.rect.h })
             })
@@ -2201,5 +2204,24 @@ mod tests {
         assert_eq!(k.lang().code, "en");
         let moved: i32 = k.take_commands().iter().map(|c| if let Cmd::Cursor(n) = c { *n } else { 0 }).sum();
         assert!(moved >= 4, "{moved}");
+    }
+
+    #[test]
+    fn swipe_works_when_the_field_starts_capitalized() {
+        // a fresh keyboard whose first field capitalizes words: Shift is on from the start
+        let mut p = Prefs::defaults(&[]);
+        p.languages = vec!["ru".into()];
+        let mut k = Keyboard::new(p);
+        // as on Android: the field starts before the view is measured
+        k.start_input(Editor::from_android(0x2061, 5), false);
+        k.set_context("", true);
+        k.measure(1080.0, 2.75, 0.0);
+        let cmds = k.take_commands();
+        load(&mut k, cmds);
+        assert_eq!(k.shift, ShiftState::On);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        swipe_word(&mut k, "привет", &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "Привет ");
     }
 }
