@@ -511,20 +511,8 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_stImeState(_: JNIEnv, _: JC
 pub extern "system" fn Java_org_rynk_keyboard_Native_stTouch(_: JNIEnv, _: JClass, action: jint, _id: jint, x: jfloat, y: jfloat, _time: jlong) {
     with_st(|h| {
         let pos = egui::pos2(x / h.dp, y / h.dp);
-        let button = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
-        match action {
-            0 => {
-                h.events.push(egui::Event::PointerMoved(pos));
-                h.events.push(button(true));
-            }
-            1 => h.events.push(egui::Event::PointerMoved(pos)),
-            2 => {
-                h.events.push(egui::Event::PointerMoved(pos));
-                h.events.push(button(false));
-                h.events.push(egui::Event::PointerGone);
-            }
-            _ => h.events.push(egui::Event::PointerGone),
-        }
+        let events = h.app.touch(action, pos);
+        h.events.extend(events);
     })
 }
 

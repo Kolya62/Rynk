@@ -32,3 +32,8 @@ Built by `tools/cjkgen.py`.
   [CC BY-SA 4.0](https://www.edrdg.org/edrdg/licence.html). <https://www.edrdg.org/jmdict/j_jmdict.html>
 - Word frequencies from the Leipzig corpora `zho_news_2020_300K`, `zho-cn_web_2015_300K`,
   `zho_wikipedia_2018_300K` and `jpn_wikipedia_2018_300K` (CC BY).
+
+## Fonts
+
+- `rust-core/fonts/NotoEmoji.ttf`: [Noto Emoji](https://github.com/google/fonts/tree/main/ofl/notoemoji),
+  © Google LLC, SIL Open Font License 1.1. Used because egui cannot draw Android's color bitmap emoji font.

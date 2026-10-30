@@ -61,6 +61,12 @@ class RynkIme : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        // Let the keyboard background show through the navigation bar instead of a light scrim
+        window?.window?.let { w ->
+            @Suppress("DEPRECATION")
+            w.navigationBarColor = android.graphics.Color.TRANSPARENT
+            if (android.os.Build.VERSION.SDK_INT >= 29) w.isNavigationBarContrastEnforced = false
+        }
         view?.requestLayout()
         afterEvent()
     }

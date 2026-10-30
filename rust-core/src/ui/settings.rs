@@ -33,6 +33,11 @@ pub struct SettingsApp {
     pub out: Vec<SettingsCmd>,
     pub changed: bool,
     confirm_clear: bool,
+    /// Finger scrolling: start y, last y, whether the finger moved far enough to scroll
+    drag: Option<(f32, f32, bool)>,
+    /// Pending scroll from the finger and the current scroll offset (points)
+    scroll_by: f32,
+    offset: f32,
 }
 
 const YELLOW: Color32 = Color32::from_rgb(0xFF, 0xDB, 0x4D);
@@ -42,7 +47,45 @@ impl SettingsApp {
         let ru = ["ru", "uk", "be", "kk", "ky", "tg", "uz", "tt", "ba", "mn", "hy", "ka", "az"]
             .iter()
             .any(|l| ui_locale.to_lowercase().starts_with(l));
-        Self { prefs, page: Page::Main, ru, enabled: false, selected: false, out: Vec::new(), changed: false, confirm_clear: false }
+        Self { prefs, page: Page::Main, ru, enabled: false, selected: false, out: Vec::new(), changed: false, confirm_clear: false, drag: None, scroll_by: 0.0, offset: 0.0 }
+    }
+
+    /// Turns a touch (0 down, 1 move, 2 up, other cancel) into egui events and scrolls the page
+    /// with the finger. egui's own drag scrolling does not react to these pointer events.
+    pub fn touch(&mut self, action: i32, pos: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        match action {
+            0 => {
+                self.drag = Some((pos.y, pos.y, false));
+                vec![egui::Event::PointerMoved(pos), button(true)]
+            }
+            1 => {
+                if let Some((y0, last, mut scrolling)) = self.drag {
+                    if !scrolling && (pos.y - y0).abs() > 8.0 {
+                        scrolling = true;
+                    }
+                    if scrolling {
+                        self.scroll_by -= pos.y - last;
+                    }
+                    self.drag = Some((y0, pos.y, scrolling));
+                }
+                vec![egui::Event::PointerMoved(pos)]
+            }
+            2 => {
+                let scrolled = self.drag.take().is_some_and(|d| d.2);
+                // after a scroll the release must not click what is under the finger
+                let at = if scrolled { egui::pos2(-1000.0, -1000.0) } else { pos };
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+                    egui::Event::PointerGone,
+                ]
+            }
+            _ => {
+                self.drag = None;
+                vec![egui::Event::PointerGone]
+            }
+        }
     }
 
     fn t<'a>(&self, ru: &'a str, en: &'a str) -> &'a str {
@@ -70,6 +113,12 @@ impl SettingsApp {
         ctx.set_visuals(v);
         ctx.global_style_mut(|s| {
             use egui::{FontId, TextStyle};
+            // A drag must scroll the page, not select label text
+            s.interaction.selectable_labels = false;
+            s.interaction.multi_widget_text_select = false;
+            // Dragging must scroll the settings, not select label text
+            s.interaction.selectable_labels = false;
+            s.interaction.multi_widget_text_select = false;
             s.text_styles.insert(TextStyle::Body, FontId::proportional(18.0));
             s.text_styles.insert(TextStyle::Button, FontId::proportional(18.0));
             s.text_styles.insert(TextStyle::Heading, FontId::proportional(26.0));
@@ -86,7 +135,12 @@ impl SettingsApp {
     pub fn ui(&mut self, root: &mut egui::Ui, top: f32, bottom: f32) {
         let frame = egui::Frame::central_panel(&root.ctx().global_style()).inner_margin(egui::Margin { left: 16, right: 16, top: top as i8, bottom: bottom.min(120.0) as i8 });
         egui::CentralPanel::default().frame(frame).show(root, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            let mut area = egui::ScrollArea::vertical();
+            if self.scroll_by != 0.0 {
+                area = area.vertical_scroll_offset((self.offset + self.scroll_by).max(0.0));
+                self.scroll_by = 0.0;
+            }
+            let shown = area.show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 match self.page {
                     Page::Main => self.main(ui),
@@ -94,6 +148,7 @@ impl SettingsApp {
                 }
                 ui.add_space(24.0);
             });
+            self.offset = shown.state.offset().y;
         });
     }
 
@@ -238,5 +293,48 @@ impl SettingsApp {
                 }
             });
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Top of the "Input" heading on screen, or None when it is scrolled out of view
+    fn frame(ctx: &egui::Context, app: &mut SettingsApp, events: Vec<egui::Event>, t: f64) -> Option<f32> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 600.0))),
+            events,
+            time: Some(t),
+            focused: true,
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| app.ui(ui, 0.0, 0.0));
+        out.shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text() == "Ввод" => Some(t.pos.y),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn finger_scrolls_settings_without_clicking() {
+        let ctx = egui::Context::default();
+        SettingsApp::style(&ctx, false);
+        let mut app = SettingsApp::new(Prefs::defaults(&["ru".into()]), "ru");
+        let before = frame(&ctx, &mut app, vec![], 0.0).expect("heading visible");
+        let prefs = app.prefs.serialize();
+        let mut t = 0.0;
+        let mut ev = app.touch(0, egui::pos2(100.0, 500.0));
+        for i in 1..=10 {
+            t += 0.016;
+            frame(&ctx, &mut app, ev, t);
+            ev = app.touch(1, egui::pos2(100.0, 500.0 - 10.0 * i as f32));
+        }
+        ev.extend(app.touch(2, egui::pos2(100.0, 400.0)));
+        frame(&ctx, &mut app, ev, t + 0.016);
+        let after = frame(&ctx, &mut app, vec![], t + 0.5).expect("heading visible");
+        assert!((before - after - 100.0).abs() < 2.0, "scrolled {before} -> {after}");
+        assert_eq!(app.prefs.serialize(), prefs, "a scroll toggled a setting");
     }
 }
