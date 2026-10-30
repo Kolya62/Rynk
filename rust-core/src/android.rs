@@ -44,7 +44,13 @@ struct Win {
     config: wgpu::SurfaceConfiguration,
     canvas: Canvas,
     gpu: Arc<Gpu>,
+    /// Which attached surface this is (detach and resize of an older surface are ignored)
+    token: i32,
+    /// Frames in a row that got no image from the surface
+    misses: u32,
 }
+
+static NEXT_TOKEN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
 
 // The window is only touched from the main thread; the mutex makes the compiler happy
 unsafe impl Send for Win {}
@@ -95,7 +101,8 @@ impl Win {
         };
         surface.configure(&gpu.device, &config);
         let canvas = Canvas::new(&gpu, format);
-        Ok(Self { native, surface: Some(surface), config, canvas, gpu })
+        let token = NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Self { native, surface: Some(surface), config, canvas, gpu, token, misses: 0 })
     }
 
     fn resize(&mut self, w: i32, h: i32) {
@@ -111,13 +118,33 @@ impl Win {
     /// The next swapchain image, or None (after reconfiguring a stale surface)
     fn acquire(&mut self) -> Option<wgpu::SurfaceTexture> {
         let surface = self.surface.as_ref()?;
-        match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                surface.configure(&self.gpu.device, &self.config);
+        let got = surface.get_current_texture();
+        match got {
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                if self.misses > 0 {
+                    diag(&format!("surface {} image after {} misses", self.token, self.misses));
+                }
+                self.misses = 0;
+                Some(t)
+            }
+            other => {
+                self.misses += 1;
+                let what = match other {
+                    wgpu::CurrentSurfaceTexture::Outdated => "outdated",
+                    wgpu::CurrentSurfaceTexture::Lost => "lost",
+                    wgpu::CurrentSurfaceTexture::Timeout => "timeout",
+                    wgpu::CurrentSurfaceTexture::Occluded => "occluded",
+                    _ => "other",
+                };
+                if self.misses <= 3 || self.misses % 20 == 0 {
+                    diag(&format!("surface {} no image: {what} (miss {})", self.token, self.misses));
+                }
+                // a stale swapchain is rebuilt; repeated misses rebuild it too
+                if matches!(what, "outdated" | "lost") || self.misses % 10 == 0 {
+                    surface.configure(&self.gpu.device, &self.config);
+                }
                 None
             }
-            _ => None,
         }
     }
 
@@ -147,6 +174,23 @@ impl Drop for Win {
         // the Vulkan surface must go before the window it lives on
         self.surface.take();
         unsafe { ndk_sys::ANativeWindow_release(self.native) };
+    }
+}
+
+/// Diagnostic journal in the app's files (`diag.txt`, last ~64 KB): Android builds such as
+/// MIUI hide app logs, and a blank keyboard has to be explained after the fact
+fn diag(msg: &str) {
+    use std::io::Write;
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    let Some(dir) = DIR.get().cloned().or_else(|| KB.try_lock().ok().and_then(|g| g.as_ref().map(|h| h.files.clone()))) else { return };
+    let _ = DIR.set(dir.clone());
+    let path = dir.join("diag.txt");
+    if std::fs::metadata(&path).map(|m| m.len() > 64 * 1024).unwrap_or(false) {
+        let _ = std::fs::rename(&path, dir.join("diag.old.txt"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let _ = writeln!(f, "{t} {msg}");
     }
 }
 
@@ -309,37 +353,49 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbMeasure(_: JNIEnv, _: JCl
 }
 
 #[no_mangle]
-pub extern "system" fn Java_org_rynk_keyboard_Native_kbAttach(env: JNIEnv, _: JClass, surface: JObject) -> jboolean {
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbAttach(env: JNIEnv, _: JClass, surface: JObject) -> jint {
     let mut wg = KWIN.lock().unwrap_or_else(|e| e.into_inner());
     *wg = None;
     match Win::new(&env, &surface) {
         Ok(w) => {
+            let token = w.token;
+            diag(&format!("attach surface {token} {}x{}", w.config.width, w.config.height));
             *wg = Some(w);
             drop(wg);
             with_kb(|h| {
                 h.font_scripts.clear();
                 h.kb.dirty = true;
             });
-            JNI_TRUE
+            token
         }
         Err(e) => {
+            diag(&format!("attach failed: {e}"));
             log::error!("keyboard surface: {e}");
-            JNI_FALSE
+            0
         }
     }
 }
 
 #[no_mangle]
-pub extern "system" fn Java_org_rynk_keyboard_Native_kbResize(_: JNIEnv, _: JClass, w: jint, hh: jint) {
-    if let Some(win) = KWIN.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbResize(_: JNIEnv, _: JClass, token: jint, w: jint, hh: jint) {
+    if let Some(win) = KWIN.lock().unwrap_or_else(|e| e.into_inner()).as_mut().filter(|w| w.token == token) {
         win.resize(w, hh);
+        win.misses = 0;
     }
     with_kb(|h| h.kb.dirty = true)
 }
 
 #[no_mangle]
-pub extern "system" fn Java_org_rynk_keyboard_Native_kbDetach(_: JNIEnv, _: JClass) {
-    *KWIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbDetach(_: JNIEnv, _: JClass, token: jint) {
+    let mut wg = KWIN.lock().unwrap_or_else(|e| e.into_inner());
+    match wg.as_ref().map(|w| w.token) {
+        Some(t) if t == token => {
+            diag(&format!("detach surface {token}"));
+            *wg = None;
+        }
+        // a new surface was attached before the old one went away: keep the new one
+        other => diag(&format!("detach of surface {token} ignored (current {other:?})")),
+    }
 }
 
 #[no_mangle]
@@ -398,16 +454,26 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbWake(_: JNIEnv, _: JClass
 pub extern "system" fn Java_org_rynk_keyboard_Native_kbRender(_: JNIEnv, _: JClass) -> jint {
     // Runs on the render thread. Order: window lock, then a short keyboard lock for layout.
     // Returns 0 when drawn, 1 when the surface had no image ready (try again shortly) and 2
-    // when there is no surface (the keyboard is hidden: nothing to do until it is attached).
+    // when there is no surface (the keyboard is hidden), 3 when the surface keeps failing (re-attach it).
     let mut wg = KWIN.lock().unwrap_or_else(|e| e.into_inner());
     let Some(win) = wg.as_mut() else { return 2 };
-    let Some(frame) = win.acquire() else { return 1 };
+    let Some(frame) = win.acquire() else {
+        // after many misses the platform should give us a fresh surface
+        return if win.misses >= 40 { 3 } else { 1 };
+    };
     let Some((full, clear)) = with_kb(|h| Some(h.layout(win))) else { return 2 };
     let size = [win.config.width, win.config.height];
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
     win.canvas.draw(&win.gpu, &view, size, full, clear);
     win.gpu.queue.present(frame);
     0
+}
+
+/// A line for the diagnostic journal from the platform side
+#[no_mangle]
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbDiag(mut env: JNIEnv, _: JClass, msg: JString) {
+    let m = jstr(&mut env, &msg);
+    diag(&m);
 }
 
 /// Asks for a frame although nothing changed (a new or resized surface)

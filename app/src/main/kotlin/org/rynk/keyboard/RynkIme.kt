@@ -65,6 +65,35 @@ class RynkIme : InputMethodService() {
         afterEvent()
     }
 
+    override fun onWindowShown() {
+        super.onWindowShown()
+        Native.kbDiag("window shown, view ${view != null}, surface ${view?.holder?.surface?.isValid}")
+        // After a quick hide and show Android may not give the SurfaceView a new surface: the
+        // window then shows only the navigation buttons. A layout pass usually brings it back;
+        // if not, the keyboard view is created anew.
+        view?.let {
+            it.requestLayout()
+            it.invalidate()
+        }
+        main.removeCallbacks(ensureSurface)
+        main.postDelayed(ensureSurface, 150)
+        forceRender()
+    }
+
+    private val ensureSurface = Runnable {
+        val v = view
+        if (isInputViewShown && v != null && !v.hasSurface) {
+            Native.kbDiag("no surface 150 ms after show: recreating the keyboard view")
+            setInputView(onCreateInputView())
+        }
+    }
+
+    override fun onWindowHidden() {
+        super.onWindowHidden()
+        main.removeCallbacks(ensureSurface)
+        Native.kbDiag("window hidden")
+    }
+
     override fun onStartInputView(info: EditorInfo, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         // Let the keyboard background show through the navigation bar instead of a light scrim
@@ -145,10 +174,17 @@ class RynkIme : InputMethodService() {
     private val renderFrame: Runnable = object : Runnable {
         override fun run() {
             renderQueued.set(false)
-            when (if (Native.kbNeedsRender()) Native.kbRender() else 0) {
-                // the surface had no image ready: try again a little later, a bounded number of times
-                1 -> if (retries++ < 60 && renderQueued.compareAndSet(false, true)) {
-                    renderHandler.postDelayed(this, 16)
+            val r = if (Native.kbNeedsRender()) Native.kbRender() else 0
+            if (r == 2 && isInputViewShown) Native.kbDiag("frame skipped: no surface while shown")
+            when (r) {
+                // the surface had no image ready: keep trying while it exists, slower over time
+                1 -> if (renderQueued.compareAndSet(false, true)) {
+                    renderHandler.postDelayed(this, if (retries++ < 30) 16L else 100L)
+                }
+                // it keeps failing: ask the view for a fresh swapchain on the same surface
+                3 -> {
+                    retries = 0
+                    main.post { view?.reattach() }
                 }
                 // drawn, or no surface (hidden): the next change or surface schedules a frame
                 else -> retries = 0

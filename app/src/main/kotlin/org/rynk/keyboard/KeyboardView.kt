@@ -13,6 +13,11 @@ import android.view.WindowInsets
 @SuppressLint("ViewConstructor")
 class KeyboardView(private val ime: RynkIme) : SurfaceView(ime), SurfaceHolder.Callback {
     private var bottomInset = 0
+    /** Token of our surface in the core; 0 when none is attached */
+    private var token = 0
+
+    /** Is a drawing surface attached right now? */
+    val hasSurface: Boolean get() = token != 0
 
     init {
         holder.addCallback(this)
@@ -53,16 +58,29 @@ class KeyboardView(private val ime: RynkIme) : SurfaceView(ime), SurfaceHolder.C
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        Native.kbAttach(holder.surface)
+        token = Native.kbAttach(holder.surface)
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        Native.kbResize(width, height)
+        if (token == 0) token = Native.kbAttach(holder.surface)
+        Native.kbResize(token, width, height)
         ime.forceRender()
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        Native.kbDetach()
+        Native.kbDetach(token)
+        token = 0
+    }
+
+    /** The surface keeps giving no images: attach it again (a fresh swapchain) */
+    fun reattach() {
+        val surface = holder.surface
+        if (surface == null || !surface.isValid) return
+        if (token != 0) Native.kbDetach(token)
+        token = Native.kbAttach(surface)
+        val r = holder.surfaceFrame
+        if (token != 0) Native.kbResize(token, r.width(), r.height())
+        ime.forceRender()
     }
 
     @SuppressLint("ClickableViewAccessibility")

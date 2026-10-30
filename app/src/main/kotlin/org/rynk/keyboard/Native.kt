@@ -13,9 +13,9 @@ object Native {
     external fun kbInit(filesDir: String, locales: String, night: Boolean)
     external fun kbNight(night: Boolean)
     external fun kbMeasure(width: Int, density: Float, bottomInset: Int, screenHeight: Int): Int
-    external fun kbAttach(surface: Surface): Boolean
-    external fun kbResize(width: Int, height: Int)
-    external fun kbDetach()
+    external fun kbAttach(surface: android.view.Surface): Int
+    external fun kbResize(token: Int, width: Int, height: Int)
+    external fun kbDetach(token: Int)
     external fun kbStartInput(inputType: Int, imeOptions: Int, restarting: Boolean)
     external fun kbFinishInput()
     external fun kbContext(before: String, caps: Boolean)
@@ -23,10 +23,11 @@ object Native {
     external fun kbTouch(action: Int, id: Int, x: Float, y: Float, time: Long)
     external fun kbTick(time: Long)
     external fun kbWake(): Long
-    /** 0 drawn, 1 surface busy (retry soon), 2 no surface */
+    /** 0 drawn, 1 surface busy (retry soon), 2 no surface, 3 surface keeps failing (re-attach) */
     external fun kbRender(): Int
     external fun kbNeedsRender(): Boolean
     external fun kbInvalidate()
+    external fun kbDiag(msg: String)
     external fun kbTakeCommands(): String
     /** Color emoji images: [names] space-separated, each [size]×[size] premultiplied RGBA in [data] */
     external fun kbEmoji(names: String, size: Int, data: ByteArray)
