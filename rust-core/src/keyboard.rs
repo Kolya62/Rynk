@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const LONG_PRESS_MS: f64 = 380.0;
+/// Space-bar swipe distance that switches the language (dp)
+const LANG_SWIPE_DP: f32 = 40.0;
 const REPEAT_START_MS: f64 = 420.0;
 const REPEAT_MS: f64 = 55.0;
 const DOUBLE_TAP_MS: f64 = 350.0;
@@ -184,6 +186,19 @@ struct Pointer {
     bksp_drag: bool,
     repeats: u32,
     next_repeat: Option<f64>,
+    /// Gesture typing: the finger left its first key while drawing a word
+    gesture: bool,
+    path: Vec<(f32, f32)>,
+    /// Space held long enough to move the cursor (when swiping space switches language)
+    cursor_armed: bool,
+}
+
+/// The last word entered by a gesture, replaceable by its alternatives
+#[derive(Clone, Debug)]
+struct GestureCommit {
+    committed: String,
+    alts: Vec<String>,
+    shift: ShiftState,
 }
 
 /// Undo record of the last automatic correction
@@ -254,6 +269,9 @@ pub struct Keyboard {
     last_shift_t: f64,
     static_grid_next: bool,
     pointers: Vec<Pointer>,
+    /// Points of the gesture being drawn, for painting the trail
+    pub trail: Vec<(f32, f32)>,
+    gesture: Option<GestureCommit>,
     out: Vec<Cmd>,
     pub dirty: bool,
 }
@@ -300,6 +318,8 @@ impl Keyboard {
             last_shift_t: f64::NEG_INFINITY,
             static_grid_next: false,
             pointers: Vec::new(),
+            trail: Vec::new(),
+            gesture: None,
             out: Vec::new(),
             dirty: true,
         };
@@ -568,6 +588,7 @@ impl Keyboard {
         self.hangul = Hangul::default();
         self.suggestions = Suggestions::default();
         self.correction = None;
+        self.gesture = None;
         self.auto_space = false;
         self.dirty = true;
     }
@@ -669,6 +690,7 @@ impl Keyboard {
     /// Types the text of a key (or popup choice); `pos` is the touch for letters
     pub fn type_text(&mut self, text: &str, pos: Option<(f32, f32)>) {
         self.correction = None;
+        self.gesture = None;
         match self.composer() {
             Composer::Hangul => {
                 let mut c = text.chars();
@@ -812,7 +834,66 @@ impl Keyboard {
         self.suggestions = Suggestions::default();
     }
 
+    /// Can a slide across letters be a gesture word here?
+    fn gesture_allowed(&self) -> bool {
+        let script_ok = !matches!(self.lang().script, "Thai" | "Lao" | "Khmer" | "Myanmar" | "CJK" | "Ethiopic");
+        self.prefs.swipe_typing
+            && self.mode == Mode::Alphabet
+            && self.composer() == Composer::None
+            && self.predictor.model.is_some()
+            && !self.editor.password
+            && !self.editor.url
+            && !self.editor.email
+            && self.editor.class == 1
+            && script_ok
+    }
+
+    fn cased(word: &str, shift: ShiftState) -> String {
+        match shift {
+            ShiftState::Off => word.to_string(),
+            ShiftState::On => crate::engine::capitalize_first(word),
+            ShiftState::Caps => word.to_uppercase(),
+        }
+    }
+
+    /// Enters the word drawn by a gesture
+    fn gesture_word(&mut self, path: &[(f32, f32)]) {
+        if !self.composing.is_empty() {
+            self.finish_word(true, " ");
+        }
+        let ctx = self.context();
+        let alts = self.predictor.gesture(path, &self.touch, &ctx, 4);
+        let Some(best) = alts.first().cloned() else {
+            self.dirty = true;
+            return;
+        };
+        if self.ctx_before.chars().last().is_some_and(|c| c.is_alphanumeric() || is_mark(c)) {
+            self.commit(" ");
+        }
+        let shift = self.shift;
+        let word = Self::cased(&best, shift);
+        let prev = self.context().prev.first().cloned();
+        let committed = format!("{word} ");
+        self.commit(&committed);
+        if self.prefs.learn && !self.editor.password {
+            self.predictor.learn(&word, prev.as_deref());
+        }
+        self.correction = None;
+        self.auto_space = true;
+        self.last_space_t = f64::NEG_INFINITY;
+        self.after_letter();
+        self.update_auto_shift();
+        self.refresh_predictions();
+        self.gesture = Some(GestureCommit { committed, alts, shift });
+        self.dirty = true;
+    }
+
     pub fn space(&mut self, t: f64) {
+        if self.gesture.take().is_some() {
+            // a gesture word already ends with a space
+            self.dirty = true;
+            return;
+        }
         let lang = self.lang();
         if self.cjk_active() {
             self.cjk_space();
@@ -851,6 +932,14 @@ impl Keyboard {
 
     pub fn backspace(&mut self) {
         self.static_grid_next = true;
+        if let Some(g) = self.gesture.take() {
+            // the whole swiped word goes at once
+            self.delete_before(&g.committed);
+            self.update_auto_shift();
+            self.refresh_predictions();
+            self.dirty = true;
+            return;
+        }
         match self.composer() {
             Composer::Hangul if !self.hangul.is_empty() => {
                 self.hangul.backspace();
@@ -936,6 +1025,7 @@ impl Keyboard {
     }
 
     pub fn enter(&mut self) {
+        self.gesture = None;
         if self.cjk_active() {
             self.cjk_enter();
             return;
@@ -966,6 +1056,18 @@ impl Keyboard {
             },
             StripItem::Cand { idx, .. } => self.cjk_pick(idx),
             StripItem::Expand(_) => self.toggle_cand_panel(),
+            StripItem::Word { text, .. } if self.gesture.is_some() && self.composing.is_empty() => {
+                let g = self.gesture.take().unwrap();
+                self.delete_before(&g.committed);
+                let word = Self::cased(&text, g.shift);
+                let committed = format!("{word} ");
+                self.commit(&committed);
+                if self.prefs.learn && !self.editor.password {
+                    let prev = self.context().prev.get(1).cloned();
+                    self.predictor.learn(&word, prev.as_deref());
+                }
+                self.gesture = Some(GestureCommit { committed, ..g });
+            }
             StripItem::Word { text, original, .. } => {
                 let prev = self.context().prev.first().cloned();
                 let typed = std::mem::take(&mut self.composing);
@@ -1004,6 +1106,20 @@ impl Keyboard {
     }
 
     fn strip_words(&self) -> Vec<StripItem> {
+        if let Some(g) = self.gesture.as_ref().filter(|g| g.alts.len() > 1) {
+            // the chosen word in the middle, alternatives around it
+            let chosen = g.committed.trim_end().to_string();
+            let others: Vec<String> = g.alts.iter().map(|a| Self::cased(a, g.shift)).filter(|a| *a != chosen).take(2).collect();
+            let mut items: Vec<StripItem> = Vec::new();
+            if let Some(a) = others.first() {
+                items.push(StripItem::Word { text: a.clone(), primary: false, original: false });
+            }
+            items.push(StripItem::Word { text: chosen, primary: true, original: false });
+            if let Some(a) = others.get(1) {
+                items.push(StripItem::Word { text: a.clone(), primary: false, original: false });
+            }
+            return items;
+        }
         if !self.composing.is_empty() && !self.suggestions.items.is_empty() {
             let primary = self.suggestions.items.len() / 2;
             let primary = if self.suggestions.items.len() == 1 { 0 } else { primary.max(1).min(self.suggestions.items.len() - 1) };
@@ -1122,7 +1238,7 @@ impl Keyboard {
 
     pub fn touch_down(&mut self, id: i32, x: f32, y: f32, t: f64) {
         // rollover: a second finger commits the first finger's key right away
-        let pending: Vec<usize> = self.pointers.iter().filter(|p| !p.done && p.key.is_some()).map(|p| p.id as usize).collect();
+        let pending: Vec<usize> = self.pointers.iter().filter(|p| !p.done && !p.gesture && p.key.is_some()).map(|p| p.id as usize).collect();
         for pid in pending {
             if let Some(i) = self.pointers.iter().position(|p| p.id as usize == pid) {
                 let p = self.pointers[i].clone();
@@ -1148,6 +1264,9 @@ impl Keyboard {
             bksp_drag: false,
             repeats: 0,
             next_repeat: None,
+            gesture: false,
+            path: vec![(x, y)],
+            cursor_armed: false,
         };
         if y < self.strip_h {
             p.strip = Some(self.strip_cell_at(x));
@@ -1223,6 +1342,21 @@ impl Keyboard {
         }
         let Some(k) = p.key.filter(|&k| k < self.keys.len()) else { return };
         match self.keys[k].kind {
+            KeyKind::Space if self.prefs.space_swipe_lang && !p.cursor_armed && self.prefs.languages.len() > 1 => {
+                // a quick swipe switches the language: right to the next, left to the previous
+                let dx = x - p.x0;
+                if dx.abs() > LANG_SWIPE_DP * self.dp && dx.abs() > (y - p.y0).abs() {
+                    let n = self.prefs.languages.len();
+                    let idx = if dx > 0.0 { (self.lang_idx + 1) % n } else { (self.lang_idx + n - 1) % n };
+                    self.pointers[i].done = true;
+                    self.pressed.retain(|&q| q != k);
+                    self.set_language(idx);
+                    if self.prefs.vibrate {
+                        self.emit(Cmd::Haptic);
+                    }
+                    self.dirty = true;
+                }
+            }
             KeyKind::Space => {
                 let step = CURSOR_STEP_DP * self.dp;
                 if !p.space_drag && (x - p.x0).abs() > step * 1.5 {
@@ -1248,6 +1382,24 @@ impl Keyboard {
                     self.pointers[i].next_repeat = None;
                     self.dirty = true;
                 }
+            }
+            KeyKind::Char(_) if self.gesture_allowed() && self.pointers.len() == 1 => {
+                let mut ptr = self.pointers[i].clone();
+                ptr.path.push((x, y));
+                if !ptr.gesture && self.popup.is_none() {
+                    let kw = self.keys[k].rect.w;
+                    let far = ((x - ptr.x0).powi(2) + (y - ptr.y0).powi(2)).sqrt() > kw * 0.9;
+                    if far && self.key_at(x, y).is_some_and(|nk| nk != k) {
+                        ptr.gesture = true;
+                        ptr.space_drag = true; // no long-press popup
+                        self.pressed.retain(|&q| q != k);
+                    }
+                }
+                if ptr.gesture {
+                    self.trail = ptr.path.clone();
+                    self.dirty = true;
+                }
+                self.pointers[i] = ptr;
             }
             KeyKind::Char(_) | KeyKind::Language | KeyKind::Emoji | KeyKind::Enter | KeyKind::Symbols | KeyKind::SymbolsMore | KeyKind::Alphabet => {
                 // a finger sliding to a neighbouring key moves the press with it
@@ -1295,6 +1447,11 @@ impl Keyboard {
             }
         } else if p.key == Some(usize::MAX) {
             self.tap_emoji_tabs(x);
+        } else if p.gesture {
+            let mut path = p.path.clone();
+            path.push((x, y));
+            self.trail.clear();
+            self.gesture_word(&path);
         } else {
             self.release_key(&p, t);
         }
@@ -1434,7 +1591,7 @@ impl Keyboard {
             if let Some(r) = p.next_repeat {
                 w = Some(w.map_or(r, |x: f64| x.min(r)));
             }
-            if self.popup.is_none() {
+            if self.popup.is_none() && !p.cursor_armed && !p.space_drag && !p.gesture {
                 if let Some(k) = p.key.and_then(|k| self.keys.get(k)) {
                     if !k.popup.is_empty() || k.kind == KeyKind::Space && self.prefs.languages.len() > 1 {
                         let lp = p.t0 + LONG_PRESS_MS;
@@ -1467,8 +1624,16 @@ impl Keyboard {
                     self.dirty = true;
                 }
             }
-            if self.popup.is_none() && t >= p.t0 + LONG_PRESS_MS && !p.space_drag {
+            if self.popup.is_none() && t >= p.t0 + LONG_PRESS_MS && !p.space_drag && !p.cursor_armed {
                 if let Some(k) = p.key.filter(|&k| k < self.keys.len()) {
+                    if self.keys[k].kind == KeyKind::Space && self.prefs.space_swipe_lang && self.prefs.languages.len() > 1 {
+                        // swiping switches languages, so a long press arms cursor moving instead
+                        self.pointers[i].cursor_armed = true;
+                        if self.prefs.vibrate {
+                            self.emit(Cmd::Haptic);
+                        }
+                        continue;
+                    }
                     let moved = (p.x - p.x0).abs() > 10.0 * self.dp;
                     if !moved {
                         self.open_popup(k);
@@ -1885,5 +2050,95 @@ mod tests {
     fn commands_encode() {
         let s = Cmd::encode(&[Cmd::Commit("a b".into()), Cmd::Cursor(-3), Cmd::Haptic]);
         assert_eq!(s, "T\u{1F}a b\u{1E}M\u{1F}-3\u{1E}H\u{1F}\u{1E}");
+    }
+
+    /// Slides one finger through the centers of the keys of `word`
+    fn swipe_word(k: &mut Keyboard, word: &str, t: &mut f64) {
+        let pts: Vec<(f32, f32)> = word
+            .chars()
+            .map(|c| {
+                let key = k.keys.iter().find(|key| key.label.to_lowercase() == c.to_string()).unwrap();
+                (key.rect.cx(), key.rect.cy())
+            })
+            .collect();
+        k.touch_down(1, pts[0].0, pts[0].1, *t);
+        for w in pts.windows(2) {
+            for s in 1..=8 {
+                let f = s as f32 / 8.0;
+                *t += 8.0;
+                k.touch_move(1, w[0].0 + (w[1].0 - w[0].0) * f, w[0].1 + (w[1].1 - w[0].1) * f, *t);
+            }
+        }
+        let last = *pts.last().unwrap();
+        k.touch_up(1, last.0, last.1, *t + 8.0);
+        *t += 200.0;
+    }
+
+    #[test]
+    fn swipe_types_words_and_backspace_removes_them() {
+        let mut k = kb(&["en"]);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        swipe_word(&mut k, "hello", &mut t);
+        assert!(k.trail.is_empty());
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "Hello ", "autocap applies to the first swiped word");
+        swipe_word(&mut k, "world", &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "Hello world ");
+        // space after a swiped word adds nothing: the word already ends with one
+        tap_kind(&mut k, KeyKind::Space, &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "Hello world ");
+        swipe_word(&mut k, "there", &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        tap_kind(&mut k, KeyKind::Backspace, &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "Hello world ", "backspace removes the whole swiped word");
+    }
+
+    #[test]
+    fn swipe_alternative_replaces_the_word() {
+        let mut k = kb(&["en"]);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        type_str(&mut k, "i ", &mut text, &mut comp, &mut t);
+        swipe_word(&mut k, "too", &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        let items = k.strip_items();
+        assert!(items.len() >= 2, "{items:?}");
+        let alt = items.iter().position(|i| matches!(i, StripItem::Word { primary: false, .. })).unwrap();
+        let StripItem::Word { text: alt_text, .. } = items[alt].clone() else { unreachable!() };
+        k.pick_strip(alt);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, format!("I {alt_text} "));
+    }
+
+    #[test]
+    fn swipe_on_space_switches_language_and_long_press_moves_cursor() {
+        let mut k = kb(&["ru", "en"]);
+        let key = k.keys.iter().find(|x| x.kind == KeyKind::Space).unwrap().clone();
+        let (x, y) = (key.rect.cx(), key.rect.cy());
+        k.touch_down(1, x, y, 0.0);
+        k.touch_move(1, x + 60.0 * k.dp, y, 60.0);
+        k.touch_up(1, x + 60.0 * k.dp, y, 90.0);
+        assert_eq!(k.lang().code, "en");
+        assert!(!k.take_commands().iter().any(|c| matches!(c, Cmd::Commit(_))), "no space typed");
+        // long press, then drag: the cursor moves and the language stays
+        k.touch_down(1, x, y, 1000.0);
+        k.tick(1000.0 + LONG_PRESS_MS + 10.0);
+        k.touch_move(1, x - 60.0 * k.dp, y, 1500.0);
+        k.touch_up(1, x - 60.0 * k.dp, y, 1550.0);
+        assert_eq!(k.lang().code, "en");
+        let moved: i32 = k.take_commands().iter().map(|c| if let Cmd::Cursor(n) = c { *n } else { 0 }).sum();
+        assert!(moved <= -4, "{moved}");
+        // with the setting off, a drag moves the cursor right away
+        let mut p = k.prefs.clone();
+        p.space_swipe_lang = false;
+        k.apply_prefs(p);
+        k.touch_down(1, x, y, 3000.0);
+        k.touch_move(1, x + 60.0 * k.dp, y, 3050.0);
+        k.touch_up(1, x + 60.0 * k.dp, y, 3080.0);
+        assert_eq!(k.lang().code, "en");
+        let moved: i32 = k.take_commands().iter().map(|c| if let Cmd::Cursor(n) = c { *n } else { 0 }).sum();
+        assert!(moved >= 4, "{moved}");
     }
 }

@@ -23,6 +23,10 @@ pub struct Prefs {
     pub vibrate: bool,
     pub number_row: bool,
     pub key_preview: bool,
+    /// Gesture typing: draw a word by sliding across its letters
+    pub swipe_typing: bool,
+    /// A horizontal swipe on the space bar switches the language
+    pub space_swipe_lang: bool,
     pub theme: Theme,
     /// Keyboard height multiplier
     pub height: f32,
@@ -53,6 +57,8 @@ impl Prefs {
             vibrate: true,
             number_row: false,
             key_preview: true,
+            swipe_typing: true,
+            space_swipe_lang: true,
             theme: Theme::System,
             height: 1.0,
         }
@@ -79,6 +85,8 @@ impl Prefs {
                 "vibrate" => p.vibrate = b,
                 "number_row" => p.number_row = b,
                 "key_preview" => p.key_preview = b,
+                "swipe_typing" => p.swipe_typing = b,
+                "space_swipe_lang" => p.space_swipe_lang = b,
                 "theme" => {
                     p.theme = match v {
                         "light" => Theme::Light,
@@ -101,7 +109,7 @@ impl Prefs {
             Theme::Dark => "dark",
         };
         format!(
-            "languages={}\nautocorrect={}\nsuggestions={}\nautocap={}\ndouble_space_period={}\ndynamic_grid={}\nlearn={}\nvibrate={}\nnumber_row={}\nkey_preview={}\ntheme={}\nheight={:.2}\n",
+            "languages={}\nautocorrect={}\nsuggestions={}\nautocap={}\ndouble_space_period={}\ndynamic_grid={}\nlearn={}\nvibrate={}\nnumber_row={}\nkey_preview={}\nswipe_typing={}\nspace_swipe_lang={}\ntheme={}\nheight={:.2}\n",
             self.languages.join(","),
             b(self.autocorrect),
             b(self.suggestions),
@@ -112,6 +120,8 @@ impl Prefs {
             b(self.vibrate),
             b(self.number_row),
             b(self.key_preview),
+            b(self.swipe_typing),
+            b(self.space_swipe_lang),
             theme,
             self.height
         )

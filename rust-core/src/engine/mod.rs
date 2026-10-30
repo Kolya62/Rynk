@@ -9,6 +9,7 @@
 //!   user's own words and word pairs.
 
 pub mod cjk;
+pub mod gesture;
 pub mod lm;
 pub mod touch;
 pub mod trie;
@@ -233,6 +234,63 @@ impl Predictor {
     }
 
     /// Suggestions and the autocorrection decision for the word being typed.
+    /// Words for a swiped path (keyboard pixels), best first, in dictionary spelling
+    pub fn gesture(&mut self, raw: &[(f32, f32)], touch: &TouchModel, ctx: &Context, limit: usize) -> Vec<String> {
+        let keys_g = gesture::GestureKeys::new(touch);
+        let Some(path) = gesture::Path::new(raw, keys_g.key_w()) else { return Vec::new() };
+        let starts = keys_g.near(path.pts[0], 1.6);
+        let ends = keys_g.near(*path.pts.last().unwrap(), 1.6);
+        if starts.is_empty() || ends.is_empty() {
+            return Vec::new();
+        }
+        self.refresh_user_trie();
+        let keys = self.model.as_ref().map(|m| m.lm.keys(ctx)).unwrap_or((None, None));
+        let fits = |lower: &str| {
+            let mut cs = lower.chars();
+            let first = cs.next();
+            let last = lower.chars().next_back();
+            lower.chars().count() >= 2 && first.is_some_and(|c| starts.contains(&c)) && last.is_some_and(|c| ends.contains(&c))
+        };
+        let mut scored: Vec<(f32, Src, String)> = Vec::new();
+        if let Some(m) = self.model.clone() {
+            for (id, w) in m.lm.words.iter().enumerate() {
+                let first = w.text.chars().next().map(|c| c.to_lowercase().next().unwrap_or(c));
+                if !first.is_some_and(|c| starts.contains(&c)) {
+                    continue;
+                }
+                let lower = w.text.to_lowercase();
+                if !fits(&lower) {
+                    continue;
+                }
+                let Some(ideal) = keys_g.ideal(&lower) else { continue };
+                let Some(cost) = keys_g.cost(&path, &ideal) else { continue };
+                let score = self.word_score(Src::Lm(id as u32), &lower, ctx, keys) - cost;
+                scored.push((score, Src::Lm(id as u32), lower));
+            }
+        }
+        for (i, lower) in self.user_words.iter().enumerate() {
+            if !fits(lower) || scored.iter().any(|s| &s.2 == lower) {
+                continue;
+            }
+            let Some(ideal) = keys_g.ideal(lower) else { continue };
+            let Some(cost) = keys_g.cost(&path, &ideal) else { continue };
+            let score = self.word_score(Src::User(i as u32), lower, ctx, keys) - cost;
+            scored.push((score, Src::User(i as u32), lower.clone()));
+        }
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut out: Vec<String> = Vec::new();
+        for (_, src, _) in scored {
+            let text = self.display(src);
+            if !text.is_empty() && !out.iter().any(|o| o.to_lowercase() == text.to_lowercase()) {
+                out.push(text);
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        out
+    }
+
     pub fn suggest(&mut self, typed: &str, taps: &[Tap], touch: &TouchModel, ctx: &Context, autocorrect: bool) -> Suggestions {
         if typed.is_empty() {
             return Suggestions::default();
@@ -626,5 +684,72 @@ mod tests {
         let start = std::time::Instant::now();
         let _ = p.suggest("достопримечательнасти", &t, &tm, &ctx(&[]), true);
         assert!(start.elapsed().as_millis() < 400, "{:?}", start.elapsed());
+    }
+
+    /// A finger path for a word: through each key with some jitter and a wobbly line between
+    fn swipe(m: &TouchModel, word: &str, seed: u32) -> Vec<(f32, f32)> {
+        let mut r = seed.wrapping_mul(2654435761).wrapping_add(12345);
+        let mut rnd = move || {
+            r ^= r << 13;
+            r ^= r >> 17;
+            r ^= r << 5;
+            (r % 1000) as f32 / 1000.0 - 0.5
+        };
+        let k = |c: char| m.key_for(c).map(|(k, _)| (k.cx, k.cy)).unwrap();
+        let pts: Vec<(f32, f32)> = word.chars().map(|c| {
+            let (x, y) = k(c);
+            (x + rnd() * 5.0, y + rnd() * 6.0)
+        }).collect();
+        let mut out = vec![pts[0]];
+        for w in pts.windows(2) {
+            let bend = rnd() * 4.0;
+            for i in 1..=6 {
+                let t = i as f32 / 6.0;
+                let off = (t * std::f32::consts::PI).sin() * bend;
+                out.push((w[0].0 + (w[1].0 - w[0].0) * t, w[0].1 + (w[1].1 - w[0].1) * t + off));
+            }
+        }
+        out
+    }
+
+    fn gesture_accuracy(code: &str, m: &TouchModel) -> (f32, f32, Vec<String>) {
+        let mut p = Predictor::default();
+        p.set_model(Some(model(code)));
+        let lm = &p.model.as_ref().unwrap().lm;
+        let mut words: Vec<(f32, String)> = lm
+            .words
+            .iter()
+            .map(|w| (w.logp, w.text.clone()))
+            .filter(|(_, t)| (3..=10).contains(&t.chars().count()) && t.chars().all(|c| m.key_for(c).is_some()))
+            .collect();
+        words.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let words: Vec<String> = words.into_iter().take(300).map(|w| w.1).collect();
+        let ctx = Context { prev: Vec::new(), sentence_start: false };
+        let (mut top1, mut top3) = (0, 0);
+        let mut misses = Vec::new();
+        for (i, w) in words.iter().enumerate() {
+            let got = p.gesture(&swipe(m, w, i as u32 + 1), m, &ctx, 3);
+            if got.first() == Some(w) {
+                top1 += 1;
+            } else if misses.len() < 15 {
+                misses.push(format!("{w}->{}", got.join("/")));
+            }
+            if got.contains(w) {
+                top3 += 1;
+            }
+        }
+        (top1 as f32 / words.len() as f32, top3 as f32 / words.len() as f32, misses)
+    }
+
+    #[test]
+    fn gesture_finds_swiped_words() {
+        let ru_t = ru();
+        let en_t = super::touch::tests::grid(&["qwertyuiop", "asdfghjkl", "zxcvbnm"]);
+        for (code, t) in [("ru", &ru_t), ("en", &en_t)] {
+            let start = std::time::Instant::now();
+            let (a1, a3, misses) = gesture_accuracy(code, t);
+            eprintln!("{code}: top1 {a1:.2} top3 {a3:.2} in {:?}; misses {misses:?}", start.elapsed());
+            assert!(a1 >= 0.8 && a3 >= 0.93, "{code}: top1 {a1} top3 {a3}");
+        }
     }
 }

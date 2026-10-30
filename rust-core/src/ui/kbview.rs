@@ -60,6 +60,22 @@ pub fn paint(kb: &Keyboard, painter: &Painter, pal: Palette) {
         paint_keys(kb, &g);
     }
     paint_overlays(kb, &g);
+    paint_trail(kb, &g);
+}
+
+/// The path of a gesture being drawn: thin at the old end, full width at the finger
+fn paint_trail(kb: &Keyboard, g: &P) {
+    let pts: Vec<Pos2> = kb.trail.iter().map(|&(x, y)| pos2(x / g.dp, y / g.dp)).collect();
+    let n = pts.len();
+    if n < 2 {
+        return;
+    }
+    for (i, w) in pts.windows(2).enumerate() {
+        let t = (i + 1) as f32 / (n - 1) as f32;
+        let color = g.pal.accent.gamma_multiply(0.35 + 0.65 * t);
+        g.p.line_segment([w[0], w[1]], egui::Stroke::new(1.5 + 3.5 * t, color));
+        g.p.circle_filled(w[1], (1.5 + 3.5 * t) / 2.0, color);
+    }
 }
 
 fn paint_strip(kb: &Keyboard, g: &P) {

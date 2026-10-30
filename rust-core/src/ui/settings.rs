@@ -148,7 +148,7 @@ impl SettingsApp {
                 }
                 ui.add_space(24.0);
             });
-            self.offset = shown.state.offset().y;
+            self.offset = shown.state.clamped_offset().y;
         });
     }
 
@@ -208,6 +208,13 @@ impl SettingsApp {
         self.toggle(ui, |p| &mut p.suggestions, &a, &b);
         let (a, b) = (s(self, "Динамическая сетка", "Dynamic key grid"), s(self, "Вероятные буквы ловят касания чуть шире", "Likely letters catch touches a bit wider"));
         self.toggle(ui, |p| &mut p.dynamic_grid, &a, &b);
+        let (a, b) = (s(self, "Набор свайпом", "Swipe typing"), s(self, "Проведите пальцем по буквам слова, не отрывая его", "Slide your finger across the letters of a word"));
+        self.toggle(ui, |p| &mut p.swipe_typing, &a, &b);
+        let (a, b) = (
+            s(self, "Смена языка свайпом по пробелу", "Swipe space to switch language"),
+            s(self, "Курсор тогда двигается после долгого нажатия на пробел", "The cursor then moves after a long press on space"),
+        );
+        self.toggle(ui, |p| &mut p.space_swipe_lang, &a, &b);
         let (a, b) = (s(self, "Заглавная в начале предложения", "Auto-capitalization"), String::new());
         self.toggle(ui, |p| &mut p.autocap, &a, &b);
         let (a, b) = (s(self, "Точка двойным пробелом", "Double-space period"), String::new());
