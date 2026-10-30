@@ -68,15 +68,22 @@ P(word | touches, context) ∝ P(touches | word) · P(word | context)
 1. **Touch model.** Each key is a 2D Gaussian around its center. Centers adapt to the user from
    the words they accept.
 2. **Dynamic key grid.** The letter of a touch is chosen from geometry times the probability of
-   the next letter in the dictionary. A key's hit area grows by at most 50%, and the grid is
-   static right after Backspace.
-3. **Candidate search.** A trie walk that prices every touch and allows an extra touch, a missed
-   letter and swapped neighbours (doubled letters cost less).
+   the next letter in the dictionary. A key's hit area grows by at most 50%; the grid is static
+   for a word's first letter and right after Backspace.
+3. **Candidate search.** A beam search over the dictionary trie, a bounded number of states per
+   touch, that prices every touch and allows an extra touch, a missed letter, swapped neighbours
+   and spelling mistakes ("тся"/"ться", unstressed vowels, doubled consonants, soft sign).
 4. **Language model.** Corpus trigrams and bigrams with stupid backoff, merged with the user's own
    words and word pairs.
 5. **Decision.** A word is replaced on space or punctuation. A word the dictionary knows is only
-   replaced by a much more likely one. Backspace right after a replacement restores the typed word
-   and stops correcting it.
+   replaced by a much more likely one. An unknown word made of letter sequences the language uses
+   (an inflection, a name) is only replaced for a clear slip of the finger. A one-letter word
+   changes only when the touch was between keys and the context prefers the other letter.
+   Backspace right after a replacement restores the typed word and stops correcting it.
+
+`examples/ac_eval.rs` measures all of this: it types corpus sentences through the keyboard with
+scattered touches and typical spelling mistakes and reports how many errors were fixed and how
+many correct words were changed.
 
 ## 🛠️ Building
 
@@ -104,7 +111,7 @@ offscreen with Vulkan to PNG files, no phone needed.
 
 Generators: `tools/gen_layouts.py` (layouts), `tools/lmgen.py` (word models),
 `tools/cjkgen.py` (Chinese and Japanese dictionaries). `tools/rlm2.py` packs word models into
-the denser RLM2 format, and the assets are then compressed with `zstd -19`.
+the denser RLM2 format, `tools/rlm_extend.py` adds missing word forms from a frequency list, and the assets are then compressed with `zstd -19`.
 
 ## 🗂️ Layout of the code
 

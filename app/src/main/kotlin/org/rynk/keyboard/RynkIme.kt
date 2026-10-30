@@ -52,6 +52,7 @@ class RynkIme : InputMethodService() {
 
     override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        expected.clear()
         cursor = attribute.initialSelEnd
         composingStart = -1
         Native.kbStartInput(attribute.inputType, attribute.imeOptions, restarting)
@@ -79,13 +80,32 @@ class RynkIme : InputMethodService() {
         super.onFinishInput()
     }
 
+    /** Cursor positions our recent edits lead to, oldest first, until the editor reports them */
+    private val expected = ArrayDeque<Int>()
+
+    private fun expect(pos: Int) {
+        if (pos < 0) return
+        expected.addLast(pos)
+        while (expected.size > 32) expected.removeFirst()
+    }
+
     override fun onUpdateSelection(
         oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int,
         candidatesStart: Int, candidatesEnd: Int,
     ) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
-        val ours = newSelStart == newSelEnd && newSelEnd == cursor
-        if (!ours) {
+        // Browsers report selections late: an update may describe a state we already moved past.
+        // It is still ours when it matches a cursor we produced recently, or when the editor's
+        // composing region is the one we are typing into.
+        val composingOurs = composingStart >= 0 && candidatesStart == composingStart && candidatesEnd >= candidatesStart
+        val ours = newSelStart == newSelEnd &&
+            (newSelEnd == cursor || expected.contains(newSelEnd) || composingOurs)
+        if (ours) {
+            // drop expectations up to the one this update confirms
+            while (expected.isNotEmpty() && expected.first() != newSelEnd) expected.removeFirst()
+            if (expected.isNotEmpty()) expected.removeFirst()
+        } else {
+            expected.clear()
             // the user moved the cursor or the app changed the text
             cursor = newSelEnd
             if (composingStart >= 0) {
@@ -163,16 +183,19 @@ class RynkIme : InputMethodService() {
                 } else if (composingStart >= 0) {
                     cursor = composingStart + arg.length
                 }
+                expect(cursor)
             }
             "T" -> ic?.let {
                 val start = if (composingStart >= 0) composingStart else cursor
                 it.commitText(arg, 1)
                 composingStart = -1
                 cursor = if (start >= 0) start + arg.length else -1
+                expect(cursor)
             }
             "D" -> ic?.let {
                 it.deleteSurroundingText(arg.length, 0)
                 if (cursor >= 0) cursor -= arg.length
+                expect(cursor)
             }
             "K" -> {
                 cursor = -1

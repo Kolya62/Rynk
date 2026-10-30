@@ -254,6 +254,8 @@ pub struct Keyboard {
     pub dp: f32,
     pub bottom_inset: f32,
     screen_h: f32,
+    /// Keyboard size and language the touch model was built for
+    touch_geom: (f32, f32, usize),
     pub strip_h: f32,
     pub height: f32,
     pub pressed: Vec<usize>,
@@ -309,6 +311,7 @@ impl Keyboard {
             dp: 2.75,
             bottom_inset: 0.0,
             screen_h: 0.0,
+            touch_geom: (0.0, 0.0, usize::MAX),
             strip_h: 0.0,
             height: 0.0,
             pressed: Vec::new(),
@@ -467,7 +470,12 @@ impl Keyboard {
         self.keys = layout::build(&o, self.key_frame());
         // Lowercase labels give the exact letters (Turkic ı/i); with Shift on, lowercased capitals
         // still make a usable model when there is none yet (a field that starts capitalized)
-        if self.mode == Mode::Alphabet && self.shift == ShiftState::Off {
+        // Lowercase labels give the exact letters (Turkic ı/i), so the model is rebuilt with
+        // Shift off; but it must also exist and match the current size when a field starts
+        // capitalized, before the first lowercase letter
+        let geom = (self.width, self.height, self.lang_idx);
+        if self.mode == Mode::Alphabet && (self.shift == ShiftState::Off || self.touch.keys().is_empty() || self.touch_geom != geom) {
+            self.touch_geom = geom;
             self.rebuild_touch_model();
         }
         self.popup = None;
@@ -554,6 +562,7 @@ impl Keyboard {
     fn request_model(&mut self) {
         self.swap_dict();
         let lang = self.lang();
+        self.predictor.rules = crate::engine::spelling::rules(lang.code);
         if !lang.conv.is_empty() {
             let path = format!("cjk/{}.rcd", lang.conv);
             if !self.convs.contains_key(&path) {
@@ -1553,7 +1562,14 @@ impl Keyboard {
                 let mut with_pos = None;
                 if key.letter && self.mode == Mode::Alphabet {
                     with_pos = Some(pos);
-                    if self.prefs.dynamic_grid && !self.static_grid_next && self.predictor.model.is_some() && self.composer() == Composer::None {
+                    // Not for a word's first letter: without the word's context the grid would pull
+                    // taps toward frequent first letters ("в" over "а"); the decoder decides there
+                    if self.prefs.dynamic_grid
+                        && !self.static_grid_next
+                        && !self.composing.is_empty()
+                        && self.predictor.model.is_some()
+                        && self.composer() == Composer::None
+                    {
                         let prefix = self.composing.to_lowercase();
                         let next = self.predictor.next_letters(&prefix);
                         if let Some(c) = self.touch.resolve(pos.0, pos.1, &next) {

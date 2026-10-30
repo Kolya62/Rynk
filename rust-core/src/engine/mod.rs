@@ -11,6 +11,7 @@
 pub mod cjk;
 pub mod gesture;
 pub mod lm;
+pub mod spelling;
 pub mod touch;
 pub mod trie;
 pub mod userdict;
@@ -33,12 +34,23 @@ const COST_INSERT_DOUBLE: f32 = 0.9;
 const COST_DELETE: f32 = 2.2;
 const COST_DELETE_DOUBLE: f32 = 0.9;
 const COST_SWAP: f32 = 1.5;
+/// States kept per tap position in the beam search
+const BEAM: usize = 160;
+/// Trie nodes whose best words are offered as completions
+const MAX_COMPLETION_NODES: usize = 24;
 /// Search effort bound per decode
 const BUDGET: u32 = 120_000;
 /// Margin (log10) a correction must win by over a word that exists in the dictionary
 const KNOWN_WORD_MARGIN: f32 = 2.6;
 /// Unknown typed word: largest channel cost of an automatic correction
 const AUTO_MAX_COST: f32 = 4.6;
+/// Unknown but plausible typed word: largest cost of a correction
+const PLAUSIBLE_MAX_COST: f32 = 2.4;
+/// ... unless the length changes: then only to a common word (log10 probability in context)
+const PLAUSIBLE_COMMON_LOGP: f32 = -4.0;
+/// One-letter words: largest touch cost of another letter, and the margin it must win by
+const SINGLE_MAX_COST: f32 = 1.0;
+const SINGLE_MARGIN: f32 = 0.7;
 /// Penalty of offering a completion instead of the exact typed length (log10)
 const COMPLETION_PENALTY: f32 = 0.6;
 
@@ -60,6 +72,14 @@ pub fn unpack(data: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
 pub struct Model {
     pub lm: LanguageModel,
     pub trie: Trie,
+    /// Letter trigrams (with word boundaries) seen in the vocabulary: a word made only of them
+    /// looks like a real word the dictionary lacks (an inflection, a name), not a typo
+    trigrams: std::collections::HashSet<u64>,
+}
+
+fn trigram_keys(lower: &str) -> impl Iterator<Item = u64> + '_ {
+    let cs: Vec<u64> = std::iter::once(1u64).chain(lower.chars().map(|c| c as u64 + 2)).chain(std::iter::once(0u64)).collect();
+    (0..cs.len().saturating_sub(2)).map(move |i| cs[i] << 42 | cs[i + 1] << 21 | cs[i + 2]).collect::<Vec<_>>().into_iter()
 }
 
 impl Model {
@@ -73,7 +93,19 @@ impl Model {
             .collect();
         lowers.retain(|w| !w.0.is_empty());
         let trie = Trie::build(lowers.iter().map(|(w, i, p)| (w.as_str(), *i, *p)));
-        Some(Self { lm, trie })
+        let mut trigrams = std::collections::HashSet::new();
+        for (w, _, p) in &lowers {
+            // rare words carry many typos and foreign names
+            if *p > -7.0 {
+                trigrams.extend(trigram_keys(w));
+            }
+        }
+        Some(Self { lm, trie, trigrams })
+    }
+
+    /// Is every letter trigram of the word one the language uses?
+    pub fn plausible(&self, lower: &str) -> bool {
+        trigram_keys(lower).all(|k| self.trigrams.contains(&k))
     }
 }
 
@@ -106,6 +138,8 @@ pub struct Suggestions {
 #[derive(Default)]
 pub struct Predictor {
     pub model: Option<Arc<Model>>,
+    /// Spelling rules of the current language
+    pub rules: &'static [spelling::Rule],
     pub user: UserDict,
     user_words: Vec<String>,
     user_trie: Trie,
@@ -191,7 +225,7 @@ impl Predictor {
         };
         let mut found: HashMap<Src, (f32, u8, bool)> = HashMap::new();
         if let Some(m) = self.model.clone() {
-            let mut s = Search { trie: &m.trie, taps, touch, max_edits, budget: BUDGET, out: Vec::new() };
+            let mut s = Search { trie: &m.trie, taps, touch, rules: self.rules, max_edits, budget: BUDGET, out: Vec::new() };
             s.run();
             let logp = |id: u32| m.lm.words[id as usize].logp;
             for (id, cost, edits, node) in s.out {
@@ -208,7 +242,7 @@ impl Predictor {
         if !self.user_trie.is_empty() {
             let user = &self.user;
             let words = &self.user_words;
-            let mut s = Search { trie: &self.user_trie, taps, touch, max_edits, budget: BUDGET / 4, out: Vec::new() };
+            let mut s = Search { trie: &self.user_trie, taps, touch, rules: self.rules, max_edits, budget: BUDGET / 4, out: Vec::new() };
             s.run();
             for (id, cost, edits, node) in s.out {
                 if id != NONE {
@@ -320,7 +354,18 @@ impl Predictor {
             f32::NEG_INFINITY
         };
 
-        let correction = if autocorrect && may_autocorrect(typed) {
+        let plausible = !typed_known && self.model.as_ref().is_some_and(|m| m.plausible(&lower));
+        let single = typed.chars().count() == 1 && typed.chars().all(char::is_alphabetic);
+        let correction = if autocorrect && single {
+            // A one-letter word: the touch may sit between two keys ("а" or "в"); the context
+            // decides, but only between one-letter words and only for an ambiguous touch
+            let own = cands.iter().find(|c| !c.completion && c.text.to_lowercase() == lower).map(|c| c.score);
+            cands
+                .iter()
+                .filter(|c| !c.completion && c.text.chars().count() == 1 && c.text.to_lowercase() != lower)
+                .find(|c| c.cost <= SINGLE_MAX_COST && own.is_none_or(|o| c.score > o + SINGLE_MARGIN))
+                .map(|c| apply_case(typed, &c.text))
+        } else if autocorrect && may_autocorrect(typed) {
             cands
                 .iter()
                 .find(|c| !c.completion)
@@ -328,6 +373,12 @@ impl Predictor {
                 .filter(|c| {
                     if typed_known {
                         c.score > typed_score + KNOWN_WORD_MARGIN && c.edits <= 1
+                    } else if plausible {
+                        // looks like a real word the dictionary lacks: only a clear slip of
+                        // the finger, keeping the length
+                        let len_diff = c.text.chars().count().abs_diff(typed.chars().count());
+                        let common = c.score + c.cost > PLAUSIBLE_COMMON_LOGP;
+                        c.cost <= PLAUSIBLE_MAX_COST && (len_diff == 0 || len_diff == 1 && common)
                     } else {
                         c.cost <= AUTO_MAX_COST
                     }
@@ -477,6 +528,7 @@ struct Search<'a> {
     trie: &'a Trie,
     taps: &'a [Tap],
     touch: &'a TouchModel,
+    rules: &'a [spelling::Rule],
     max_edits: u8,
     budget: u32,
     /// (word id, channel cost, edits, node for completions)
@@ -484,47 +536,106 @@ struct Search<'a> {
 }
 
 impl Search<'_> {
+    /// Beam search over the trie, one bucket of states per tap position: each bucket keeps
+    /// only its `BEAM` cheapest states, so the work per keystroke stays bounded however many
+    /// edits are allowed.
     fn run(&mut self) {
-        self.go(self.trie.root(), 0, 0.0, 0, None);
-    }
-
-    fn go(&mut self, n: u32, i: usize, cost: f32, edits: u8, last: Option<char>) {
-        if cost > MAX_COST || self.budget == 0 {
-            return;
-        }
-        self.budget -= 1;
         let taps = self.taps;
-        if i == taps.len() {
-            let node = self.trie.node(n);
-            let word = (node.word != NONE).then_some(node.word);
-            if let Some(w) = word {
-                self.out.push((w, cost, edits, None));
+        let n_taps = taps.len();
+        // (node, edits) -> (cost, last letter)
+        type Bucket = HashMap<(u32, u8), (f32, Option<char>)>;
+        let mut buckets: Vec<Bucket> = (0..=n_taps).map(|_| HashMap::new()).collect();
+        fn put(b: &mut Bucket, node: u32, edits: u8, cost: f32, last: Option<char>) -> bool {
+            if cost > MAX_COST {
+                return false;
             }
-            // completions only from close readings
-            if edits <= 1 && taps.len() >= 2 {
-                self.out.push((NONE, cost, edits, Some(n)));
+            match b.get_mut(&(node, edits)) {
+                Some(v) if v.0 <= cost => false,
+                Some(v) => {
+                    *v = (cost, last);
+                    true
+                }
+                None => {
+                    b.insert((node, edits), (cost, last));
+                    true
+                }
             }
         }
-        let kids: &[(char, u32)] = self.trie.children(n);
-        if i < taps.len() {
-            let tap = &taps[i];
-            // match
-            for &(c, k) in kids {
-                if let Some(cc) = self.touch.cost(tap, c) {
-                    if cc <= MAX_TAP_COST {
-                        let far = (cc > FAR_TAP) as u8;
-                        if edits + far <= self.max_edits {
-                            self.go(k, i + 1, cost + cc, edits + far, Some(c));
+        put(&mut buckets[0], self.trie.root(), 0, 0.0, None);
+        for i in 0..=n_taps {
+            // missed letters (and spelling rules that type nothing) stay at this tap
+            if i > 0 {
+                let mut work: Vec<(u32, u8)> = buckets[i].keys().copied().collect();
+                while let Some((n, e)) = work.pop() {
+                    if self.budget == 0 {
+                        break;
+                    }
+                    self.budget -= 1;
+                    let Some(&(cost, last)) = buckets[i].get(&(n, e)) else { continue };
+                    if e >= self.max_edits {
+                        continue;
+                    }
+                    for &(c, k) in self.trie.children(n) {
+                        let double = last == Some(c);
+                        let dc = if double { COST_DELETE_DOUBLE } else { COST_DELETE };
+                        if put(&mut buckets[i], k, e + 1, cost + dc, Some(c)) {
+                            work.push((k, e + 1));
                         }
+                    }
+                    for &(typed, meant, rc) in self.rules.iter().filter(|r| r.0.is_empty()) {
+                        if let Some(m) = self.walk(n, meant) {
+                            if put(&mut buckets[i], m, e + 1, cost + rc, meant.chars().last().or(last)) {
+                                work.push((m, e + 1));
+                            }
+                        }
+                        let _ = typed;
                     }
                 }
             }
-            if edits < self.max_edits {
+            // keep the cheapest states
+            let mut states: Vec<((u32, u8), (f32, Option<char>))> = buckets[i].drain().collect();
+            states.sort_by(|a, b| a.1 .0.total_cmp(&b.1 .0));
+            states.truncate(BEAM);
+            if i == n_taps {
+                let mut completions = 0;
+                for &((n, e), (cost, _)) in &states {
+                    let node = self.trie.node(n);
+                    if node.word != NONE {
+                        self.out.push((node.word, cost, e, None));
+                    }
+                    if e <= 1 && n_taps >= 2 && completions < MAX_COMPLETION_NODES {
+                        completions += 1;
+                        self.out.push((NONE, cost, e, Some(n)));
+                    }
+                }
+                break;
+            }
+            let tap = &taps[i];
+            for &((n, e), (cost, last)) in &states {
+                if self.budget == 0 {
+                    break;
+                }
+                self.budget -= 1;
+                let kids: &[(char, u32)] = self.trie.children(n);
+                // match
+                for &(c, k) in kids {
+                    if let Some(cc) = self.touch.cost(tap, c) {
+                        if cc <= MAX_TAP_COST {
+                            let far = (cc > FAR_TAP) as u8;
+                            if e + far <= self.max_edits {
+                                put(&mut buckets[i + 1], k, e + far, cost + cc, Some(c));
+                            }
+                        }
+                    }
+                }
+                if e >= self.max_edits {
+                    continue;
+                }
                 // extra tap
                 let double = last == Some(tap.ch) || (i > 0 && taps[i - 1].ch == tap.ch);
-                self.go(n, i + 1, cost + if double { COST_INSERT_DOUBLE } else { COST_INSERT }, edits + 1, last);
+                put(&mut buckets[i + 1], n, e + 1, cost + if double { COST_INSERT_DOUBLE } else { COST_INSERT }, last);
                 // swapped neighbours
-                if i + 1 < taps.len() {
+                if i + 1 < n_taps {
                     for &(c1, k1) in kids {
                         let Some(a) = self.touch.cost(&taps[i + 1], c1) else { continue };
                         if a > 1.0 {
@@ -536,21 +647,31 @@ impl Search<'_> {
                             }
                             if let Some(b) = self.touch.cost(tap, c2) {
                                 if b <= 1.0 {
-                                    self.go(k2, i + 2, cost + COST_SWAP + a + b, edits + 1, Some(c2));
+                                    put(&mut buckets[i + 2], k2, e + 1, cost + COST_SWAP + a + b, Some(c2));
                                 }
                             }
                         }
                     }
                 }
+                // spelling rules: the touched letters spell `typed` where the word has `meant`
+                for &(typed, meant, rc) in self.rules {
+                    let tl = typed.chars().count();
+                    if tl == 0 || i + tl > n_taps || !typed.chars().zip(&taps[i..i + tl]).all(|(c, t)| t.ch == c) {
+                        continue;
+                    }
+                    if let Some(m) = self.walk(n, meant) {
+                        put(&mut buckets[i + tl], m, e + 1, cost + rc, meant.chars().last().or(last));
+                    }
+                }
             }
         }
-        // missed letter
-        if edits < self.max_edits && i > 0 {
-            for &(c, k) in kids {
-                let double = last == Some(c);
-                self.go(k, i, cost + if double { COST_DELETE_DOUBLE } else { COST_DELETE }, edits + 1, Some(c));
-            }
+    }
+
+    fn walk(&self, mut n: u32, s: &str) -> Option<u32> {
+        for c in s.chars() {
+            n = self.trie.child(n, c)?;
         }
+        Some(n)
     }
 }
 
