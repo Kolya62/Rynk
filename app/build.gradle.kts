@@ -21,8 +21,8 @@ android {
         applicationId = "org.rynk.keyboard"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.0"
+        versionCode = 4
+        versionName = "0.2.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
@@ -57,6 +57,8 @@ android {
 
     // compressed native libraries and assets: smaller APK (libraries are extracted on install)
     packaging { jniLibs { useLegacyPackaging = true } }
+    // models and dictionaries are already zstd-compressed; deflating them again gains nothing
+    androidResources { noCompress += listOf("rlm", "rcd") }
 }
 
 kotlin {

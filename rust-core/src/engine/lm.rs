@@ -7,12 +7,18 @@
 //!          bigram groups, trigram groups:
 //!          varint n_groups, per group: varint key delta, varint k, k × [varint id, u8 q]
 //! ```
+//!
+//! RLM2 (`tools/rlm2.py`) is the same model packed denser: words as codes of a per-file
+//! alphabet with a delta-coded `q` of their unigram probability instead of counts, and n-gram
+//! ids delta-coded in ascending order followed by their `q / 6`.
+//!
 //! Bigram key = ctx(prev1); trigram key = ctx(prev2) << 32 | ctx(prev1); ctx(id) = id + 1 and
 //! 0 is the sentence start. `q = round(-log10(p) * 32)`.
 
 use std::collections::HashMap;
 
 const MAGIC: &[u8; 4] = b"RLM1";
+const MAGIC2: &[u8; 4] = b"RLM2";
 const Q_SCALE: f32 = 32.0;
 /// Stupid backoff weight per dropped order, log10(0.4)
 pub const BACKOFF: f32 = -0.398;
@@ -48,6 +54,40 @@ impl Ngrams {
 
     pub fn logp(&self, key: u64, id: u32) -> Option<f32> {
         self.get(key).iter().find(|e| e.0 == id).map(|e| -(e.1 as f32) / Q_SCALE)
+    }
+
+    /// RLM2 groups: ascending delta-coded ids, then their coarse q; stored most probable first
+    fn read2(r: &mut Reader, n_words: u32) -> Option<Self> {
+        let n = r.varint()? as usize;
+        let mut t = Ngrams {
+            keys: Vec::with_capacity(n.min(1 << 22)),
+            offsets: Vec::with_capacity(n.min(1 << 22)),
+            entries: Vec::new(),
+        };
+        let mut key = 0u64;
+        let mut ids: Vec<u32> = Vec::new();
+        for _ in 0..n {
+            key = key.checked_add(r.varint()?)?;
+            let k = r.varint()? as usize;
+            t.keys.push(key);
+            let start = t.entries.len();
+            t.offsets.push(start as u32);
+            ids.clear();
+            let mut id = 0u64;
+            for _ in 0..k {
+                id = id.checked_add(r.varint()?)?;
+                if id >= n_words as u64 {
+                    return None;
+                }
+                ids.push(id as u32);
+            }
+            for &id in &ids {
+                let q = (r.u8()? as u32 * 6).min(255) as u8;
+                t.entries.push((id, q));
+            }
+            t.entries[start..].sort_by_key(|e| (e.1, e.0));
+        }
+        Some(t)
     }
 
     fn read(r: &mut Reader, n_words: u32) -> Option<Self> {
@@ -94,7 +134,9 @@ pub struct Context {
 
 impl LanguageModel {
     pub fn decode(data: &[u8]) -> Option<Self> {
-        if data.len() < 12 || &data[..4] != MAGIC || u16::from_le_bytes([data[4], data[5]]) != 1 {
+        let data = &*crate::engine::unpack(data)?;
+        let v2 = data.len() >= 12 && &data[..4] == MAGIC2 && u16::from_le_bytes([data[4], data[5]]) == 2;
+        if !v2 && (data.len() < 12 || &data[..4] != MAGIC || u16::from_le_bytes([data[4], data[5]]) != 1) {
             return None;
         }
         let sum = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
@@ -103,6 +145,9 @@ impl LanguageModel {
             return None;
         }
         let mut r = Reader { d: payload, p: 0 };
+        if v2 {
+            return Self::decode2(&mut r);
+        }
         let n = u32::try_from(r.varint()?).ok()?;
         let mut raw = Vec::with_capacity((n as usize).min(payload.len()));
         let mut total = 0f64;
@@ -129,6 +174,39 @@ impl LanguageModel {
             .collect();
         let bigrams = Ngrams::read(&mut r, n)?;
         let trigrams = Ngrams::read(&mut r, n)?;
+        let mut index = HashMap::with_capacity(words.len());
+        for (i, w) in words.iter().enumerate() {
+            index.entry(w.text.to_lowercase()).or_insert(i as u32);
+        }
+        Some(Self { words, index, bigrams, trigrams })
+    }
+
+    fn decode2(r: &mut Reader) -> Option<Self> {
+        let n_alpha = r.varint()? as usize;
+        let mut alpha = Vec::with_capacity(n_alpha.min(255));
+        for _ in 0..n_alpha.min(255) {
+            alpha.push(char::from_u32(u32::try_from(r.varint()?).ok()?)?);
+        }
+        let n = u32::try_from(r.varint()?).ok()?;
+        let mut words = Vec::with_capacity((n as usize).min(r.d.len()));
+        let mut q = 0i64;
+        for _ in 0..n {
+            let len = r.varint()? as usize;
+            let mut text = String::with_capacity(len * 2);
+            for _ in 0..len {
+                let c = r.u8()?;
+                if c == 255 {
+                    text.push(char::from_u32(u32::try_from(r.varint()?).ok()?)?);
+                } else {
+                    text.push(*alpha.get(c as usize)?);
+                }
+            }
+            let z = r.varint()? as i64;
+            q += if z & 1 == 0 { z >> 1 } else { -((z + 1) >> 1) };
+            words.push(Word { text, logp: -(q as f32) / Q_SCALE });
+        }
+        let bigrams = Ngrams::read2(r, n)?;
+        let trigrams = Ngrams::read2(r, n)?;
         let mut index = HashMap::with_capacity(words.len());
         for (i, w) in words.iter().enumerate() {
             index.entry(w.text.to_lowercase()).or_insert(i as u32);

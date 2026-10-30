@@ -214,9 +214,9 @@ fn paint_emoji(kb: &Keyboard, g: &P) {
         if y < top - cell || y > bottom + cell {
             continue;
         }
-        if !emoji_image(kb, &p, e, pos2(x, y), cell * 0.62) {
-            p.text(pos2(x, y), Align2::CENTER_CENTER, e, FontId::proportional(cell * 0.55), g.pal.text);
-        }
+        // Android's emoji font is a color bitmap font egui cannot draw: the platform draws
+        // the images, and the cell stays empty for the moment until they arrive
+        emoji_image(kb, &p, e, pos2(x, y), cell * 0.62);
     }
     // tabs: [ABC] [categories] [⌫]
     let n = kb.emoji_tab_count();
@@ -236,9 +236,7 @@ fn paint_emoji(kb: &Keyboard, g: &P) {
                 g.p.rect_filled(r, CornerRadius::same(7), g.pal.key);
             }
             let icon = emoji::CATEGORIES[i - 1].0;
-            if !emoji_image(kb, g.p, icon, c, 26.0) {
-                g.p.text(c, Align2::CENTER_CENTER, icon, FontId::proportional(20.0), g.pal.text);
-            }
+            emoji_image(kb, g.p, icon, c, 26.0);
         }
     }
 }

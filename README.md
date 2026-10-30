@@ -24,6 +24,7 @@ Written in Rust · drawn with egui on Vulkan · nothing ever leaves your phone
 ## ✨ Why Rynk
 
 - 🎯 **Autocorrect that understands your fingers.** A touch model learns where *you* actually hit each key.
+- ✍️ **Swipe typing.** Slide across the letters of a word without lifting your finger.
 - 🔮 **Predictions** of the next word as soon as you press space.
 - 🌍 **117 layouts**, including Chinese, Japanese, Korean, Arabic and Indic scripts.
 - 🔒 **Fully offline.** No network permission, no accounts, no telemetry.
@@ -43,11 +44,16 @@ License: GPL-3.0-or-later. Dictionaries and language models: CC BY-SA 4.0, see
 - **Japanese.** Romaji → kana → kanji, including inflected verbs and adjectives (たべた → 食べた).
   Space walks through candidates, Enter confirms.
 - **Vietnamese Telex** (aa → â, ow → ơ, dd → đ, tones s f r x j).
-- **Default languages** are the system languages that have a layout, plus English.
+- **Swipe typing.** The drawn path is compared with each word's path through its key centers
+  and weighed by the language model; the strip offers alternatives, and Backspace removes a
+  swiped word at once.
+- **Default languages** are the system languages that have a layout, plus English. A swipe on the
+  space bar switches to the next or previous one (a long press then moves the cursor); both
+  swipe features can be turned off.
 - **Typing aids.** Word suggestions and next-word predictions, double-space period, smart spacing
-  around punctuation, auto-capitalization, cursor control by swiping the space bar, word deletion
+  around punctuation, auto-capitalization, cursor control on the space bar, word deletion
   by swiping Backspace, accelerating Backspace repeat, long-press variants with a corner hint
-  ("ъ" on "ь", "ё" on "е"), emoji, light and dark themes.
+  ("ъ" on "ь", "ё" on "е"), color emoji, light and dark themes, landscape and tablet layouts.
 - **Complex scripts in the strip.** Arabic letters are joined, right-to-left text is reordered and
   Indic pre-base vowel signs are placed correctly, since egui has no shaping engine.
 
@@ -97,7 +103,8 @@ Japanese, every layout and model, and typing scenarios end to end. `snapshot` re
 offscreen with Vulkan to PNG files, no phone needed.
 
 Generators: `tools/gen_layouts.py` (layouts), `tools/lmgen.py` (word models),
-`tools/cjkgen.py` (Chinese and Japanese dictionaries).
+`tools/cjkgen.py` (Chinese and Japanese dictionaries). `tools/rlm2.py` packs word models into
+the denser RLM2 format, and the assets are then compressed with `zstd -19`.
 
 ## 🗂️ Layout of the code
 

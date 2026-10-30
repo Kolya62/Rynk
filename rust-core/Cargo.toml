@@ -1,6 +1,6 @@
 [package]
 name = "rynk_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Rynk keyboard core: layouts, noisy-channel autocorrect and egui/Vulkan rendering"
@@ -15,6 +15,7 @@ egui-wgpu = { version = "0.37", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["vulkan", "std", "wgsl"] }
 pollster = "0.4"
 log = "0.4"
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false }

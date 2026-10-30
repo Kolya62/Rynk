@@ -6,9 +6,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Android system fonts first; the Linux paths only matter for host snapshots
-/// Monochrome Noto Emoji (SIL Open Font License 1.1)
-static NOTO_EMOJI: &[u8] = include_bytes!("../../fonts/NotoEmoji.ttf");
-
 const DIRS: &[&str] = &["/system/fonts", "/usr/share/fonts/noto", "/usr/share/fonts/noto-cjk", "/usr/share/fonts/TTF"];
 
 fn read(path: &Path) -> Option<Vec<u8>> {
@@ -84,9 +81,6 @@ pub fn definitions(scripts: &[&str]) -> FontDefinitions {
         for (i, k) in front.iter().enumerate() {
             list.insert(i, k.clone());
         }
-        // Android's emoji font is a color bitmap font egui cannot draw; use outline Noto Emoji
-        list.push("noto-emoji".into());
     }
-    defs.font_data.insert("noto-emoji".into(), Arc::new(FontData::from_static(NOTO_EMOJI)));
     defs
 }

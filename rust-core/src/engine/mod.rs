@@ -42,6 +42,20 @@ const AUTO_MAX_COST: f32 = 4.6;
 /// Penalty of offering a completion instead of the exact typed length (log10)
 const COMPLETION_PENALTY: f32 = 0.6;
 
+/// Asset bytes as stored: zstd-compressed (the APK keeps them as they are) or plain
+pub fn unpack(data: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+    if data.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
+        use std::io::Read;
+        let mut src = data;
+        let mut dec = ruzstd::decoding::StreamingDecoder::new(&mut src).ok()?;
+        let mut out = Vec::with_capacity(data.len() * 2);
+        dec.read_to_end(&mut out).ok()?;
+        Some(std::borrow::Cow::Owned(out))
+    } else {
+        Some(std::borrow::Cow::Borrowed(data))
+    }
+}
+
 /// Corpus model plus its trie, built once per language (in the background)
 pub struct Model {
     pub lm: LanguageModel,

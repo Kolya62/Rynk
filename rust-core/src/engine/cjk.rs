@@ -36,6 +36,7 @@ pub struct Conv {
 
 impl ConvDict {
     pub fn decode(data: &[u8]) -> Option<Self> {
+        let data = &*super::unpack(data)?;
         if data.len() < 12 || &data[..4] != b"RCD1" {
             return None;
         }
