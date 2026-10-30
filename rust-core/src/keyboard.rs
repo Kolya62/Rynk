@@ -165,7 +165,9 @@ impl Editor {
     }
 
     fn wants_suggestions(&self) -> bool {
-        !self.password && !self.no_suggestions && !self.numeric() && !self.email && !self.url
+        // address bars are search boxes too: words get suggestions, addresses are protected
+        // when the word is finished (see `Keyboard::in_address`)
+        !self.password && !self.no_suggestions && !self.numeric() && !self.email
     }
 }
 
@@ -818,11 +820,12 @@ impl Keyboard {
             return;
         }
 
-        // separator: finish the word first
+        // separator: finish the word first (in an address field "." "/" ":" are part of an
+        // address, so the word before them is left as typed)
         let smart = SMART_PUNCT.contains(&text);
         let had_word = !self.composing.is_empty();
         if had_word {
-            self.finish_word(true, "");
+            self.finish_word(!self.editor.url, "");
         }
         if smart && self.auto_space && self.ctx_before.ends_with(' ') {
             // "word ," → "word, "
@@ -881,6 +884,7 @@ impl Keyboard {
             }
             return;
         }
+        let allow_correction = allow_correction && !self.in_address();
         let typed = std::mem::take(&mut self.composing);
         let taps = std::mem::take(&mut self.taps);
         let corrected = if allow_correction && self.autocorrect_enabled() {
@@ -906,6 +910,11 @@ impl Keyboard {
         self.suggestions = Suggestions::default();
     }
 
+    /// In an address field, is the text since the last space an address rather than a word?
+    fn in_address(&self) -> bool {
+        self.editor.url && self.ctx_before.rsplit(char::is_whitespace).next().is_some_and(|t| t.contains(['.', '/', ':', '@']))
+    }
+
     /// Can a slide across letters be a gesture word here?
     fn gesture_allowed(&self) -> bool {
         let script_ok = !matches!(self.lang().script, "Thai" | "Lao" | "Khmer" | "Myanmar" | "CJK" | "Ethiopic");
@@ -914,7 +923,6 @@ impl Keyboard {
             && self.composer() == Composer::None
             && self.predictor.model.is_some()
             && !self.editor.password
-            && !self.editor.url
             && !self.editor.email
             && self.editor.class == 1
             && script_ok
@@ -945,7 +953,8 @@ impl Keyboard {
         let shift = self.shift;
         let word = Self::cased(&best, shift);
         let prev = self.context().prev.first().cloned();
-        let committed = format!("{word} ");
+        // inside an address ("yandex." + "ru") no space follows the word
+        let committed = if self.in_address() { word.clone() } else { format!("{word} ") };
         self.commit(&committed);
         if self.prefs.learn && !self.editor.password {
             self.predictor.learn(&word, prev.as_deref());
@@ -2239,5 +2248,30 @@ mod tests {
         swipe_word(&mut k, "привет", &mut t);
         apply(&mut text, &mut comp, k.take_commands());
         assert_eq!(text, "Привет ");
+    }
+
+    #[test]
+    fn address_bar_corrects_words_but_not_addresses() {
+        let mut k = kb(&["ru", "en"]);
+        // Firefox's address bar: text, URI variation, action Go
+        k.start_input(Editor::from_android(0x11, 2), false);
+        let cmds = k.take_commands();
+        load(&mut k, cmds);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        type_str(&mut k, "пртвет ", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "привет ", "a search query is corrected");
+        swipe_word(&mut k, "как", &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "привет как ", "swipe works in the address bar");
+        // an address stays as typed
+        let mut k = kb(&["en"]);
+        k.start_input(Editor::from_android(0x11, 2), false);
+        let cmds = k.take_commands();
+        load(&mut k, cmds);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        type_str(&mut k, "githb.com/rynk", &mut text, &mut comp, &mut t);
+        tap_kind(&mut k, KeyKind::Enter, &mut t);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "githb.com/rynk");
     }
 }
