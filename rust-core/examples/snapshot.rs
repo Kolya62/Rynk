@@ -23,6 +23,8 @@ fn main() {
         ("ru_light", &["ru", "en"], false, "пр"),
         ("ru_dark", &["ru", "en"], true, ""),
         ("en_light", &["en"], false, "helo"),
+        ("en_dark", &["en"], true, "how are "),
+        ("en_popup_light", &["en"], false, "caf"),
         ("hi_light", &["hi"], false, ""),
         ("zh_light", &["zh-Hans"], false, "zhongguoren"),
         ("zhuyin_dark", &["zh-TW"], true, "ㄋㄧˇㄏㄠˇ"),
@@ -54,9 +56,10 @@ fn main() {
             kb.touch_down(1, key.rect.cx(), key.rect.cy(), 0.0);
             kb.touch_up(1, key.rect.cx(), key.rect.cy(), 30.0);
         }
-        if name == "ru_dark" {
-            // show the long-press popup of "е"
-            let key = kb.keys.iter().find(|k| k.label.to_lowercase() == "е").unwrap().clone();
+        let popup = match name { "ru_dark" => Some("е"), "en_popup_light" => Some("e"), _ => None };
+        if let Some(p) = popup {
+            // show the long-press popup
+            let key = kb.keys.iter().find(|k| k.label.to_lowercase() == p).unwrap().clone();
             kb.touch_down(1, key.rect.cx(), key.rect.cy(), 0.0);
             kb.tick(1000.0);
         }

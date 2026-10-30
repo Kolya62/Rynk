@@ -1,13 +1,39 @@
-# Rynk
+<div align="center">
 
-An Android keyboard with on-device autocorrect for 117 layouts. The core and the whole interface
-are written in Rust; the UI is drawn with [egui](https://github.com/emilk/egui) on Vulkan through
-[wgpu](https://wgpu.rs). Kotlin only connects the core to Android. Nothing leaves the device.
+# ⌨️ Rynk
+
+**A fast, private Android keyboard with smart autocorrect for 117 languages.**
+
+Written in Rust · drawn with egui on Vulkan · nothing ever leaves your phone
+
+[![License: GPL v3+](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/Kolya62/Rynk?color=FFDB4D)](https://github.com/Kolya62/Rynk/releases/latest)
+![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)
+![Rust](https://img.shields.io/badge/core-Rust-B7410E?logo=rust)
+
+<img src="docs/screenshots/autocorrect.png" width="32%" alt="Autocorrect suggestions for a typo">
+<img src="docs/screenshots/predictions-dark.png" width="32%" alt="Next-word predictions in the dark theme">
+<img src="docs/screenshots/accents.png" width="32%" alt="Long-press accents">
+
+<sub>Fixing a typo · predicting the next word in the dark theme · long-press accents</sub>
+
+**[⬇️ Download the latest APK](https://github.com/Kolya62/Rynk/releases/latest)**
+
+</div>
+
+## ✨ Why Rynk
+
+- 🎯 **Autocorrect that understands your fingers.** A touch model learns where *you* actually hit each key.
+- 🔮 **Predictions** of the next word as soon as you press space.
+- 🌍 **117 layouts**, including Chinese, Japanese, Korean, Arabic and Indic scripts.
+- 🔒 **Fully offline.** No network permission, no accounts, no telemetry.
+- 🌗 **Light and dark themes** that follow the system.
+- 🦀 **Rust core.** The whole interface is drawn on the GPU through Vulkan.
 
 License: GPL-3.0-or-later. Dictionaries and language models: CC BY-SA 4.0, see
 [DATA_LICENSES.md](DATA_LICENSES.md).
 
-## Features
+## 📋 Features
 
 - **117 layouts.** Latin, Cyrillic, Greek, Armenian, Georgian, Hebrew, Arabic script, Indic
   scripts (InScript with a Shift layer), Sinhala, Thai, Lao, Khmer, Myanmar, Ethiopic, Korean.
@@ -25,7 +51,7 @@ License: GPL-3.0-or-later. Dictionaries and language models: CC BY-SA 4.0, see
 - **Complex scripts in the strip.** Arabic letters are joined, right-to-left text is reordered and
   Indic pre-base vowel signs are placed correctly, since egui has no shaping engine.
 
-## Autocorrect
+## 🧠 Autocorrect
 
 A noisy-channel model:
 
@@ -46,7 +72,7 @@ P(word | touches, context) ∝ P(touches | word) · P(word | context)
    replaced by a much more likely one. Backspace right after a replacement restores the typed word
    and stops correcting it.
 
-## Building
+## 🛠️ Building
 
 Requires Rust with the `aarch64-linux-android`, `armv7-linux-androideabi` and
 `x86_64-linux-android` targets, [cargo-ndk](https://github.com/bbqsrc/cargo-ndk), Android SDK 35
@@ -73,7 +99,7 @@ offscreen with Vulkan to PNG files, no phone needed.
 Generators: `tools/gen_layouts.py` (layouts), `tools/lmgen.py` (word models),
 `tools/cjkgen.py` (Chinese and Japanese dictionaries).
 
-## Layout of the code
+## 🗂️ Layout of the code
 
 | Path | Contents |
 |---|---|
@@ -85,7 +111,7 @@ Generators: `tools/gen_layouts.py` (layouts), `tools/lmgen.py` (word models),
 | `rust-core/src/gfx.rs`, `android.rs` | Vulkan through wgpu, JNI |
 | `app/src/main/kotlin` | input method service, Surface, InputConnection |
 
-## Known limitations
+## ⚠️ Known limitations
 
 - Scottish Gaelic and Lao have no word model; Kurmanji, Thai, Khmer and Myanmar only a short list.
 - Japanese conversion works on words and stems, without a full morphological analyzer.
