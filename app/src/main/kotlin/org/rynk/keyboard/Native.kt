@@ -23,8 +23,10 @@ object Native {
     external fun kbTouch(action: Int, id: Int, x: Float, y: Float, time: Long)
     external fun kbTick(time: Long)
     external fun kbWake(): Long
-    external fun kbRender()
+    /** 0 drawn, 1 surface busy (retry soon), 2 no surface */
+    external fun kbRender(): Int
     external fun kbNeedsRender(): Boolean
+    external fun kbInvalidate()
     external fun kbTakeCommands(): String
     /** Color emoji images: [names] space-separated, each [size]×[size] premultiplied RGBA in [data] */
     external fun kbEmoji(names: String, size: Int, data: ByteArray)

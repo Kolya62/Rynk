@@ -58,7 +58,7 @@ class KeyboardView(private val ime: RynkIme) : SurfaceView(ime), SurfaceHolder.C
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         Native.kbResize(width, height)
-        Native.kbRender()
+        ime.forceRender()
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {

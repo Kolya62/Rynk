@@ -214,7 +214,7 @@ impl KbHost {
         scripts.sort_unstable();
         scripts.dedup();
         if scripts != self.font_scripts {
-            ctx.set_fonts(fonts::definitions(&scripts));
+            ctx.set_fonts(fonts::cached(&scripts));
             self.font_scripts = scripts;
         }
     }
@@ -395,19 +395,25 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbWake(_: JNIEnv, _: JClass
 }
 
 #[no_mangle]
-pub extern "system" fn Java_org_rynk_keyboard_Native_kbRender(_: JNIEnv, _: JClass) {
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbRender(_: JNIEnv, _: JClass) -> jint {
     // Runs on the render thread. Order: window lock, then a short keyboard lock for layout.
+    // Returns 0 when drawn, 1 when the surface had no image ready (try again shortly) and 2
+    // when there is no surface (the keyboard is hidden: nothing to do until it is attached).
     let mut wg = KWIN.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(win) = wg.as_mut() else { return };
-    let Some(frame) = win.acquire() else {
-        with_kb(|h| h.kb.dirty = true);
-        return;
-    };
-    let Some((full, clear)) = with_kb(|h| Some(h.layout(win))) else { return };
+    let Some(win) = wg.as_mut() else { return 2 };
+    let Some(frame) = win.acquire() else { return 1 };
+    let Some((full, clear)) = with_kb(|h| Some(h.layout(win))) else { return 2 };
     let size = [win.config.width, win.config.height];
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
     win.canvas.draw(&win.gpu, &view, size, full, clear);
     win.gpu.queue.present(frame);
+    0
+}
+
+/// Asks for a frame although nothing changed (a new or resized surface)
+#[no_mangle]
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbInvalidate(_: JNIEnv, _: JClass) {
+    with_kb(|h| h.kb.dirty = true)
 }
 
 #[no_mangle]
@@ -567,7 +573,7 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_stRender(_: JNIEnv, _: JCla
         };
         let Some(win) = &mut h.win else { return JNI_FALSE };
         if !h.fonts_set {
-            win.canvas.ctx.set_fonts(fonts::definitions(&[]));
+            win.canvas.ctx.set_fonts(fonts::cached(&[]));
             h.fonts_set = true;
         }
         SettingsApp::style(&win.canvas.ctx, dark);

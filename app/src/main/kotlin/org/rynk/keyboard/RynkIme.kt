@@ -44,6 +44,11 @@ class RynkIme : InputMethodService() {
 
     override fun onEvaluateFullscreenMode(): Boolean = false
 
+    // The default hides the keyboard whenever Android thinks a hardware keyboard is attached;
+    // Bluetooth devices (remotes, some headsets) can claim to be one, and then tapping a text
+    // field showed nothing
+    override fun onEvaluateInputViewShown(): Boolean = true
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         Native.kbNight(Platform.night(this))
@@ -68,7 +73,10 @@ class RynkIme : InputMethodService() {
             w.navigationBarColor = android.graphics.Color.TRANSPARENT
             if (android.os.Build.VERSION.SDK_INT >= 29) w.isNavigationBarContrastEnforced = false
         }
+        // a touch whose release went to a hidden window must not linger
+        Native.kbTouch(3, 0, 0f, 0f, SystemClock.uptimeMillis())
         view?.requestLayout()
+        forceRender()
         afterEvent()
     }
 
@@ -125,7 +133,6 @@ class RynkIme : InputMethodService() {
         Native.kbContext(before, caps)
     }
 
-    /** Applies the core's commands, redraws if needed and schedules the next timer */
     /**
      * Frames are drawn on their own thread: handing a frame to the display can wait for it,
      * and touches on the main thread must never wait behind that. At most one frame is queued;
@@ -134,17 +141,32 @@ class RynkIme : InputMethodService() {
     private val renderThread = android.os.HandlerThread("rynk-render", android.os.Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val renderHandler = android.os.Handler(renderThread.looper)
     private val renderQueued = java.util.concurrent.atomic.AtomicBoolean(false)
-    private val renderFrame = Runnable {
-        renderQueued.set(false)
-        if (Native.kbNeedsRender()) Native.kbRender()
-        // a stale surface skips a frame; try again
-        scheduleRender()
+    private var retries = 0
+    private val renderFrame: Runnable = object : Runnable {
+        override fun run() {
+            renderQueued.set(false)
+            when (if (Native.kbNeedsRender()) Native.kbRender() else 0) {
+                // the surface had no image ready: try again a little later, a bounded number of times
+                1 -> if (retries++ < 60 && renderQueued.compareAndSet(false, true)) {
+                    renderHandler.postDelayed(this, 16)
+                }
+                // drawn, or no surface (hidden): the next change or surface schedules a frame
+                else -> retries = 0
+            }
+        }
     }
 
-    private fun scheduleRender() {
+    /** Draws a frame on the render thread when something changed (never more than one queued) */
+    fun scheduleRender() {
         if (Native.kbNeedsRender() && renderQueued.compareAndSet(false, true)) {
             renderHandler.post(renderFrame)
         }
+    }
+
+    /** A new or resized surface must be drawn even if nothing else changed */
+    fun forceRender() {
+        Native.kbInvalidate()
+        scheduleRender()
     }
 
     fun afterEvent() {

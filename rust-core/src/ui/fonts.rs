@@ -38,6 +38,26 @@ fn script_font(files: &[String], script: &str) -> Option<String> {
     None
 }
 
+/// Like [`definitions`], but each set of scripts is read from disk once per process: the
+/// keyboard gets a new window (and egui context) every time it is shown, and the CJK fonts
+/// alone are tens of megabytes
+pub fn cached(scripts: &[&str]) -> FontDefinitions {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Vec<(Vec<String>, FontDefinitions)>> = Mutex::new(Vec::new());
+    let key: Vec<String> = scripts.iter().map(|s| s.to_string()).collect();
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, d)) = c.iter().find(|(k, _)| *k == key) {
+        return d.clone();
+    }
+    let d = definitions(scripts);
+    // keep the last few sets (switching between languages of different scripts)
+    if c.len() >= 3 {
+        c.remove(0);
+    }
+    c.push((key, d.clone()));
+    d
+}
+
 /// egui fonts for the given scripts (Latin, Cyrillic and Greek need nothing beyond Roboto)
 pub fn definitions(scripts: &[&str]) -> FontDefinitions {
     let mut defs = FontDefinitions::default();

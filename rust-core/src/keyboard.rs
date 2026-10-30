@@ -2274,4 +2274,45 @@ mod tests {
         apply(&mut text, &mut comp, k.take_commands());
         assert_eq!(text, "githb.com/rynk");
     }
+
+    /// Random touches, field changes and resizes must never panic (a panic kills the keyboard)
+    #[test]
+    fn random_input_never_panics() {
+        let mut seed = 0x2545F4914F6CDD1Du64;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n.max(1)
+        };
+        for langs in [&["ru", "en"][..], &["zh-Hans"], &["ja"], &["ko"], &["ar"], &["hi"], &["vi"], &["zh-TW", "yue"]] {
+            let mut k = kb(langs);
+            let mut t = 0.0;
+            for _ in 0..6000 {
+                t += rnd(200) as f64;
+                let (w, h) = (k.width, k.height.max(1.0));
+                let (x, y) = (rnd(w as u64 + 40) as f32 - 20.0, rnd(h as u64 + 40) as f32 - 20.0);
+                let id = rnd(3) as i32;
+                match rnd(100) {
+                    0..=34 => k.touch_down(id, x, y, t),
+                    35..=59 => k.touch_move(id, x, y, t),
+                    60..=89 => k.touch_up(id, x, y, t),
+                    90..=92 => k.touch_cancel(),
+                    93..=94 => k.tick(t),
+                    95 => k.start_input(Editor::from_android([0x1, 0x11, 0x2061, 0x4c0a1, 0x81, 0x2, 0x21][rnd(7) as usize], rnd(8) as i32), rnd(2) == 0),
+                    96 => {
+                        k.measure([1080.0, 2340.0, 720.0][rnd(3) as usize], 2.75, rnd(150) as f32);
+                    }
+                    97 => k.set_context(["", "Привет ", "hello.", "a b c", "日本"][rnd(5) as usize], rnd(2) == 0),
+                    98 => k.reset_composition(true),
+                    _ => {
+                        k.reset_composition(true);
+                        k.touch_cancel();
+                    }
+                }
+                let cmds = k.take_commands();
+                load(&mut k, cmds);
+            }
+        }
+    }
 }
