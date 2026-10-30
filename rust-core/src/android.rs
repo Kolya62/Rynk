@@ -22,6 +22,9 @@ extern "C" {}
 static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
 static GPU: Mutex<Option<Arc<Gpu>>> = Mutex::new(None);
 static KB: Mutex<Option<KbHost>> = Mutex::new(None);
+/// The keyboard's Vulkan window. It has its own lock so that presenting a frame (which can
+/// wait for the display) never blocks touch handling, which only needs `KB`.
+static KWIN: Mutex<Option<Win>> = Mutex::new(None);
 static ST: Mutex<Option<StHost>> = Mutex::new(None);
 
 fn init_log() {
@@ -105,6 +108,19 @@ impl Win {
         }
     }
 
+    /// The next swapchain image, or None (after reconfiguring a stale surface)
+    fn acquire(&mut self) -> Option<wgpu::SurfaceTexture> {
+        let surface = self.surface.as_ref()?;
+        match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                surface.configure(&self.gpu.device, &self.config);
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Draws one frame; returns whether egui asks for another one soon
     fn frame(&mut self, ppp: f32, events: Vec<egui::Event>, time: f64, clear: egui::Color32, ui: impl FnMut(&mut egui::Ui)) -> bool {
         let Some(surface) = &self.surface else { return false };
@@ -158,7 +174,6 @@ fn save(path: &PathBuf, text: &str) {
 
 struct KbHost {
     kb: Keyboard,
-    win: Option<Win>,
     files: PathBuf,
     locales: Vec<String>,
     night: bool,
@@ -194,15 +209,13 @@ impl KbHost {
         }
     }
 
-    fn update_fonts(&mut self) {
+    fn update_fonts(&mut self, ctx: &egui::Context) {
         let mut scripts: Vec<&'static str> = self.kb.prefs.languages.iter().filter_map(|c| crate::layout::LangDef::by_code(c)).map(|l| l.script).collect();
         scripts.sort_unstable();
         scripts.dedup();
-        if let Some(w) = &self.win {
-            if scripts != self.font_scripts {
-                w.canvas.ctx.set_fonts(fonts::definitions(&scripts));
-                self.font_scripts = scripts;
-            }
+        if scripts != self.font_scripts {
+            ctx.set_fonts(fonts::definitions(&scripts));
+            self.font_scripts = scripts;
         }
     }
 
@@ -214,16 +227,17 @@ impl KbHost {
         save(&self.files.join("touch.txt"), &calib);
     }
 
-    fn render(&mut self) {
-        self.update_fonts();
+    /// Lays out a frame (under the keyboard lock, which is held only for this)
+    fn layout(&mut self, win: &mut Win) -> (egui::FullOutput, egui::Color32) {
+        self.update_fonts(&win.canvas.ctx);
         let pal = self.palette();
         let t = self.started.elapsed().as_secs_f64();
         let dp = self.kb.dp;
         let kb = &self.kb;
-        if let Some(w) = &mut self.win {
-            w.frame(dp, Vec::new(), t, pal.bg, |ui| kbview::paint(kb, ui.painter(), pal));
-        }
+        let size = [win.config.width, win.config.height];
+        let full = win.canvas.run(size, dp, Vec::new(), t, |ui| kbview::paint(kb, ui.painter(), pal));
         self.kb.dirty = false;
+        (full, pal.bg)
     }
 }
 
@@ -261,7 +275,6 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbInit(mut env: JNIEnv, _: 
     }
     let host = KbHost {
         kb,
-        win: None,
         prefs_mtime: mtime(&prefs_path),
         files,
         locales,
@@ -281,8 +294,9 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbNight(_: JNIEnv, _: JClas
 }
 
 #[no_mangle]
-pub extern "system" fn Java_org_rynk_keyboard_Native_kbMeasure(_: JNIEnv, _: JClass, width: jint, dp: jfloat, inset: jint) -> jint {
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbMeasure(_: JNIEnv, _: JClass, width: jint, dp: jfloat, inset: jint, screen_h: jint) -> jint {
     with_kb(|h| {
+        h.kb.set_screen_height(screen_h as f32);
         h.reload_prefs();
         let calib = std::fs::read_to_string(h.files.join("touch.txt")).unwrap_or_default();
         let first = h.kb.height <= 0.0;
@@ -296,36 +310,36 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbMeasure(_: JNIEnv, _: JCl
 
 #[no_mangle]
 pub extern "system" fn Java_org_rynk_keyboard_Native_kbAttach(env: JNIEnv, _: JClass, surface: JObject) -> jboolean {
-    with_kb(|h| {
-        h.win = None;
-        match Win::new(&env, &surface) {
-            Ok(w) => {
-                h.win = Some(w);
+    let mut wg = KWIN.lock().unwrap_or_else(|e| e.into_inner());
+    *wg = None;
+    match Win::new(&env, &surface) {
+        Ok(w) => {
+            *wg = Some(w);
+            drop(wg);
+            with_kb(|h| {
                 h.font_scripts.clear();
                 h.kb.dirty = true;
-                JNI_TRUE
-            }
-            Err(e) => {
-                log::error!("keyboard surface: {e}");
-                JNI_FALSE
-            }
+            });
+            JNI_TRUE
         }
-    })
+        Err(e) => {
+            log::error!("keyboard surface: {e}");
+            JNI_FALSE
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "system" fn Java_org_rynk_keyboard_Native_kbResize(_: JNIEnv, _: JClass, w: jint, hh: jint) {
-    with_kb(|h| {
-        if let Some(win) = &mut h.win {
-            win.resize(w, hh);
-        }
-        h.kb.dirty = true;
-    })
+    if let Some(win) = KWIN.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        win.resize(w, hh);
+    }
+    with_kb(|h| h.kb.dirty = true)
 }
 
 #[no_mangle]
 pub extern "system" fn Java_org_rynk_keyboard_Native_kbDetach(_: JNIEnv, _: JClass) {
-    with_kb(|h| h.win = None)
+    *KWIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[no_mangle]
@@ -382,7 +396,18 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbWake(_: JNIEnv, _: JClass
 
 #[no_mangle]
 pub extern "system" fn Java_org_rynk_keyboard_Native_kbRender(_: JNIEnv, _: JClass) {
-    with_kb(|h| h.render())
+    // Runs on the render thread. Order: window lock, then a short keyboard lock for layout.
+    let mut wg = KWIN.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(win) = wg.as_mut() else { return };
+    let Some(frame) = win.acquire() else {
+        with_kb(|h| h.kb.dirty = true);
+        return;
+    };
+    let Some((full, clear)) = with_kb(|h| Some(h.layout(win))) else { return };
+    let size = [win.config.width, win.config.height];
+    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    win.canvas.draw(&win.gpu, &view, size, full, clear);
+    win.gpu.queue.present(frame);
 }
 
 #[no_mangle]
@@ -394,6 +419,21 @@ pub extern "system" fn Java_org_rynk_keyboard_Native_kbNeedsRender(_: JNIEnv, _:
 pub extern "system" fn Java_org_rynk_keyboard_Native_kbTakeCommands(env: JNIEnv, _: JClass) -> jstring {
     let s = with_kb(|h| Cmd::encode(&h.kb.take_commands()));
     env.new_string(s).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+/// Color emoji drawn by the platform: `names` space-separated, each image `size`×`size` RGBA
+#[no_mangle]
+pub extern "system" fn Java_org_rynk_keyboard_Native_kbEmoji(mut env: JNIEnv, _: JClass, names: JString, size: jint, data: JByteArray) {
+    let names = jstr(&mut env, &names);
+    let Ok(bytes) = env.convert_byte_array(&data) else { return };
+    let n = (size.max(1) as usize).pow(2) * 4;
+    with_kb(|h| {
+        for (i, name) in names.split(' ').enumerate() {
+            let Some(px) = bytes.get(i * n..(i + 1) * n) else { break };
+            let image = crate::keyboard::EmojiImage { size: [size as usize, size as usize], rgba: Arc::new(px.to_vec()) };
+            h.kb.emoji_loaded(name, image);
+        }
+    });
 }
 
 /// Builds a language model (`lm/*.rlm`) or conversion dictionary (`cjk/*.rcd`) from asset bytes

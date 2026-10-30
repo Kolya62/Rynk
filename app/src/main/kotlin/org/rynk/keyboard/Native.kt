@@ -12,7 +12,7 @@ object Native {
     // keyboard
     external fun kbInit(filesDir: String, locales: String, night: Boolean)
     external fun kbNight(night: Boolean)
-    external fun kbMeasure(width: Int, density: Float, bottomInset: Int): Int
+    external fun kbMeasure(width: Int, density: Float, bottomInset: Int, screenHeight: Int): Int
     external fun kbAttach(surface: Surface): Boolean
     external fun kbResize(width: Int, height: Int)
     external fun kbDetach()
@@ -26,6 +26,8 @@ object Native {
     external fun kbRender()
     external fun kbNeedsRender(): Boolean
     external fun kbTakeCommands(): String
+    /** Color emoji images: [names] space-separated, each [size]×[size] premultiplied RGBA in [data] */
+    external fun kbEmoji(names: String, size: Int, data: ByteArray)
     external fun kbModel(path: String, data: ByteArray)
 
     // settings screen

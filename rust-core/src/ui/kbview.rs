@@ -172,7 +172,7 @@ fn paint_keys(kb: &Keyboard, g: &P) {
         let fg = if is_enter { g.pal.accent_text } else if key.func { g.pal.text_func } else { g.pal.text };
         match &key.kind {
             KeyKind::Char(_) => {
-                let size = if key.letter { (r.height() * 0.5).min(25.0) } else if key.func { 22.0 } else { (r.height() * 0.44).min(23.0) };
+                let size = if key.letter { (r.height() * 0.72).min(25.0) } else if key.func { 22.0 } else { (r.height() * 0.44).min(23.0) };
                 g.text_fit(c + vec2(0.0, 1.0), &visible(&key.label), size, r.width() - 4.0, fg);
                 if let Some(h) = &key.hint {
                     g.p.text(r.right_top() + vec2(-4.0, 2.0), Align2::RIGHT_TOP, h, FontId::proportional(11.0), g.pal.hint);
@@ -214,7 +214,9 @@ fn paint_emoji(kb: &Keyboard, g: &P) {
         if y < top - cell || y > bottom + cell {
             continue;
         }
-        p.text(pos2(x, y), Align2::CENTER_CENTER, e, FontId::proportional(cell * 0.55), g.pal.text);
+        if !emoji_image(kb, &p, e, pos2(x, y), cell * 0.62) {
+            p.text(pos2(x, y), Align2::CENTER_CENTER, e, FontId::proportional(cell * 0.55), g.pal.text);
+        }
     }
     // tabs: [ABC] [categories] [⌫]
     let n = kb.emoji_tab_count();
@@ -233,9 +235,32 @@ fn paint_emoji(kb: &Keyboard, g: &P) {
             if i - 1 == kb.emoji_cat {
                 g.p.rect_filled(r, CornerRadius::same(7), g.pal.key);
             }
-            g.p.text(c, Align2::CENTER_CENTER, emoji::CATEGORIES[i - 1].0, FontId::proportional(20.0), g.pal.text);
+            let icon = emoji::CATEGORIES[i - 1].0;
+            if !emoji_image(kb, g.p, icon, c, 26.0) {
+                g.p.text(c, Align2::CENTER_CENTER, icon, FontId::proportional(20.0), g.pal.text);
+            }
         }
     }
+}
+
+thread_local! {
+    static EMOJI_TEX: std::cell::RefCell<std::collections::HashMap<String, egui::TextureHandle>> = Default::default();
+}
+
+/// Draws a color emoji image the platform made; false when there is none yet
+fn emoji_image(kb: &Keyboard, p: &Painter, e: &str, c: Pos2, size: f32) -> bool {
+    let Some(img) = kb.emoji_images.get(e) else { return false };
+    EMOJI_TEX.with(|t| {
+        let mut t = t.borrow_mut();
+        let tex = t.entry(e.to_string()).or_insert_with(|| {
+            let ci = egui::ColorImage::from_rgba_premultiplied(img.size, &img.rgba);
+            p.ctx().load_texture(format!("emoji:{e}"), ci, egui::TextureOptions::LINEAR)
+        });
+        let aspect = img.size[0] as f32 / img.size[1].max(1) as f32;
+        let r = Rect::from_center_size(c, vec2(size * aspect, size));
+        p.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    });
+    true
 }
 
 fn paint_overlays(kb: &Keyboard, g: &P) {

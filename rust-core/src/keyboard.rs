@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const LONG_PRESS_MS: f64 = 380.0;
+/// Largest share of the screen height the keyboard (without the navigation bar) may take
+const MAX_SCREEN_SHARE: f32 = 0.5;
 /// Space-bar swipe distance that switches the language (dp)
 const LANG_SWIPE_DP: f32 = 40.0;
 const REPEAT_START_MS: f64 = 420.0;
@@ -53,6 +55,15 @@ pub enum Cmd {
     Relayout,
     /// Load the language model of this asset code (in the background)
     LoadModel(String),
+    /// Draw these emoji (space-separated, after the size in px) with the system color font
+    RenderEmoji(String),
+}
+
+/// An emoji drawn by the platform: premultiplied RGBA
+#[derive(Clone, Debug)]
+pub struct EmojiImage {
+    pub size: [usize; 2],
+    pub rgba: Arc<Vec<u8>>,
 }
 
 impl Cmd {
@@ -76,6 +87,7 @@ impl Cmd {
                 Cmd::Hide => ("X", ""),
                 Cmd::Relayout => ("R", ""),
                 Cmd::LoadModel(c) => ("L", c.as_str()),
+                Cmd::RenderEmoji(c) => ("E", c.as_str()),
             };
             s.push_str(op);
             s.push('\u{1F}');
@@ -107,6 +119,8 @@ pub struct Editor {
     pub url: bool,
     pub no_suggestions: bool,
     pub cap_sentences: bool,
+    /// Capitalize every word (names): the app's caps hint is trusted
+    pub cap_words: bool,
     pub multi_line: bool,
     pub action: EnterAction,
 }
@@ -140,6 +154,7 @@ impl Editor {
             url: class == 1 && variation == 0x10,
             no_suggestions: class == 1 && flags & 0x80000 != 0,
             cap_sentences: class == 1 && flags & (0x1000 | 0x2000 | 0x4000) != 0,
+            cap_words: class == 1 && flags & (0x1000 | 0x2000) != 0,
             multi_line,
             action: if multi_line && action == EnterAction::Newline { EnterAction::Newline } else { action },
         }
@@ -238,6 +253,7 @@ pub struct Keyboard {
     pub width: f32,
     pub dp: f32,
     pub bottom_inset: f32,
+    screen_h: f32,
     pub strip_h: f32,
     pub height: f32,
     pub pressed: Vec<usize>,
@@ -271,6 +287,10 @@ pub struct Keyboard {
     pointers: Vec<Pointer>,
     /// Points of the gesture being drawn, for painting the trail
     pub trail: Vec<(f32, f32)>,
+    /// Color emoji drawn by the platform, by emoji text
+    pub emoji_images: HashMap<String, EmojiImage>,
+    /// Emoji categories already sent for drawing (the tab icons are category usize::MAX)
+    emoji_asked: std::collections::HashSet<usize>,
     gesture: Option<GestureCommit>,
     out: Vec<Cmd>,
     pub dirty: bool,
@@ -288,6 +308,7 @@ impl Keyboard {
             width: 1080.0,
             dp: 2.75,
             bottom_inset: 0.0,
+            screen_h: 0.0,
             strip_h: 0.0,
             height: 0.0,
             pressed: Vec::new(),
@@ -319,6 +340,8 @@ impl Keyboard {
             static_grid_next: false,
             pointers: Vec::new(),
             trail: Vec::new(),
+            emoji_images: HashMap::new(),
+            emoji_asked: Default::default(),
             gesture: None,
             out: Vec::new(),
             dirty: true,
@@ -337,7 +360,29 @@ impl Keyboard {
     }
 
     pub fn take_commands(&mut self) -> Vec<Cmd> {
+        if self.mode == Mode::Emoji {
+            // ask the platform for color images of what the palette shows
+            let px = (self.emoji_cell() * 0.62).round() as u32;
+            for cat in [usize::MAX, self.emoji_cat] {
+                if self.emoji_asked.insert(cat) {
+                    let list: Vec<&str> = if cat == usize::MAX {
+                        crate::emoji::CATEGORIES.iter().map(|c| c.0).collect()
+                    } else {
+                        crate::emoji::items(cat)
+                    };
+                    self.out.push(Cmd::RenderEmoji(format!("{px} {}", list.join(" "))));
+                }
+            }
+        }
         std::mem::take(&mut self.out)
+    }
+
+    /// The platform drew an emoji
+    pub fn emoji_loaded(&mut self, text: &str, image: EmojiImage) {
+        self.emoji_images.insert(text.to_string(), image);
+        if self.mode == Mode::Emoji {
+            self.dirty = true;
+        }
     }
 
     pub fn composing(&self) -> &str {
@@ -347,7 +392,19 @@ impl Keyboard {
     // ------------------------------------------------------------------ geometry
 
     fn row_h(&self) -> f32 {
-        54.0 * self.dp * self.prefs.height
+        let want = 54.0 * self.dp * self.prefs.height;
+        if self.screen_h <= 0.0 {
+            return want;
+        }
+        // landscape and short screens: the keyboard takes at most about half of the screen
+        let rows = self.rows_for_height().max(1) as f32;
+        let room = (self.screen_h * MAX_SCREEN_SHARE - self.strip_h - 4.0 * self.dp) / rows;
+        want.min(room).max(30.0 * self.dp)
+    }
+
+    /// Height of the screen in px, so the keyboard can stay small in landscape
+    pub fn set_screen_height(&mut self, h: f32) {
+        self.screen_h = h;
     }
 
     fn rows_for_height(&self) -> usize {
@@ -603,7 +660,10 @@ impl Keyboard {
         }
         let ctx = self.context();
         let at_start = ctx.prev.is_empty() && ctx.sentence_start;
-        let want = self.prefs.autocap && self.editor.cap_sentences && (self.caps_hint || at_start);
+        // The app's caps hint is only trusted for fields that capitalize every word (names):
+        // some apps report "capitalize" after every space even in ordinary text fields
+        let hint = self.caps_hint && self.editor.cap_words;
+        let want = self.prefs.autocap && self.editor.cap_sentences && (hint || at_start);
         let s = if want { ShiftState::On } else { ShiftState::Off };
         if s != self.shift {
             self.shift = s;
@@ -1460,6 +1520,7 @@ impl Keyboard {
 
     pub fn touch_cancel(&mut self) {
         self.pointers.clear();
+        self.trail.clear();
         self.pressed.clear();
         self.popup = None;
         self.dirty = true;

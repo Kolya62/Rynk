@@ -25,6 +25,8 @@ fn main() {
         ("en_light", &["en"], false, "helo"),
         ("en_dark", &["en"], true, "how are "),
         ("en_popup_light", &["en"], false, "caf"),
+        ("ru_landscape", &["ru", "en"], false, "пр"),
+        ("en_tablet", &["en"], false, "helo"),
         ("hi_light", &["hi"], false, ""),
         ("zh_light", &["zh-Hans"], false, "zhongguoren"),
         ("zhuyin_dark", &["zh-TW"], true, "ㄋㄧˇㄏㄠˇ"),
@@ -35,7 +37,14 @@ fn main() {
         let mut p = Prefs::defaults(&[]);
         p.languages = langs.iter().map(|s| s.to_string()).collect();
         let mut kb = Keyboard::new(p);
-        let h = kb.measure(W as f32, DP, 0.0) as u32;
+        // phone portrait by default; a landscape phone and a landscape 10" tablet
+        let (w, dp, screen_h) = match name {
+            "ru_landscape" => (2340u32, 2.8125f32, 1080.0f32),
+            "en_tablet" => (2560, 2.0, 1600.0),
+            _ => (W, DP, 2340.0),
+        };
+        kb.set_screen_height(screen_h);
+        let h = kb.measure(w as f32, dp, 0.0) as u32;
         kb.start_input(Editor::from_android(0x4001, 3), false);
         for c in kb.take_commands() {
             if let Cmd::LoadModel(path) = c {
@@ -67,11 +76,11 @@ fn main() {
         canvas.ctx.set_fonts(rynk_core::ui::fonts::definitions(&scripts));
         let pal = if dark { theme::DARK } else { theme::LIGHT };
         // two passes: the first one loads the fonts
-        let mut first = canvas.run([W, h], DP, Vec::new(), 0.0, |ui| kbview::paint(&kb, ui.painter(), pal));
-        let mut full = canvas.run([W, h], DP, Vec::new(), 0.0, |ui| kbview::paint(&kb, ui.painter(), pal));
+        let mut first = canvas.run([w, h], dp, Vec::new(), 0.0, |ui| kbview::paint(&kb, ui.painter(), pal));
+        let mut full = canvas.run([w, h], dp, Vec::new(), 0.0, |ui| kbview::paint(&kb, ui.painter(), pal));
         first.textures_delta.append(std::mem::take(&mut full.textures_delta));
         full.textures_delta = first.textures_delta;
-        save(&gpu, &mut canvas, full, [W, h], pal.bg, &format!("{out}/{name}.png"));
+        save(&gpu, &mut canvas, full, [w, h], pal.bg, &format!("{out}/{name}.png"));
     }
 
     // settings screen

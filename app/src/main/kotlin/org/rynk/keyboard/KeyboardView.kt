@@ -48,7 +48,7 @@ class KeyboardView(private val ime: RynkIme) : SurfaceView(ime), SurfaceHolder.C
         // so read them from the root window as well.
         bottomInset = maxOf(bottomInset, bottomOf(rootWindowInsets))
         val width = MeasureSpec.getSize(widthMeasureSpec)
-        val height = Native.kbMeasure(width, resources.displayMetrics.density, bottomInset)
+        val height = Native.kbMeasure(width, resources.displayMetrics.density, bottomInset, resources.displayMetrics.heightPixels)
         setMeasuredDimension(width, height)
     }
 

@@ -106,9 +106,30 @@ class RynkIme : InputMethodService() {
     }
 
     /** Applies the core's commands, redraws if needed and schedules the next timer */
+    /**
+     * Frames are drawn on their own thread: handing a frame to the display can wait for it,
+     * and touches on the main thread must never wait behind that. At most one frame is queued;
+     * changes made while a frame is drawn queue the next one.
+     */
+    private val renderThread = android.os.HandlerThread("rynk-render", android.os.Process.THREAD_PRIORITY_DISPLAY).apply { start() }
+    private val renderHandler = android.os.Handler(renderThread.looper)
+    private val renderQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val renderFrame = Runnable {
+        renderQueued.set(false)
+        if (Native.kbNeedsRender()) Native.kbRender()
+        // a stale surface skips a frame; try again
+        scheduleRender()
+    }
+
+    private fun scheduleRender() {
+        if (Native.kbNeedsRender() && renderQueued.compareAndSet(false, true)) {
+            renderHandler.post(renderFrame)
+        }
+    }
+
     fun afterEvent() {
         apply(Native.kbTakeCommands())
-        if (Native.kbNeedsRender()) Native.kbRender()
+        scheduleRender()
         main.removeCallbacks(tick)
         val wake = Native.kbWake()
         if (wake >= 0) main.postAtTime(tick, wake)
@@ -178,6 +199,42 @@ class RynkIme : InputMethodService() {
             "X" -> requestHideSelf(0)
             "R" -> view?.requestLayout()
             "L" -> loadModel(arg)
+            "E" -> renderEmoji(arg)
+        }
+    }
+
+    /**
+     * Draws emoji with the system color font, which egui cannot render itself.
+     * [arg] is the image size in px followed by the emoji, space-separated.
+     */
+    private fun renderEmoji(arg: String) {
+        val parts = arg.split(' ').filter { it.isNotEmpty() }
+        val size = parts.firstOrNull()?.toIntOrNull()?.coerceIn(16, 256) ?: return
+        val list = parts.drop(1)
+        loader.execute {
+            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                textAlign = android.graphics.Paint.Align.CENTER
+            }
+            val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(bmp)
+            val one = size * size * 4
+            // send in chunks so the first rows appear quickly
+            for (chunk in list.chunked(24)) {
+                val data = ByteArray(one * chunk.size)
+                chunk.forEachIndexed { i, e ->
+                    bmp.eraseColor(android.graphics.Color.TRANSPARENT)
+                    paint.textSize = size.toFloat()
+                    val w = paint.measureText(e)
+                    if (w > size) paint.textSize = size * size / w
+                    val fm = paint.fontMetrics
+                    canvas.drawText(e, size / 2f, size / 2f - (fm.ascent + fm.descent) / 2f, paint)
+                    val buf = java.nio.ByteBuffer.wrap(data, i * one, one)
+                    bmp.copyPixelsToBuffer(buf)
+                }
+                Native.kbEmoji(chunk.joinToString(" "), size, data)
+                main.post { afterEvent() }
+            }
+            bmp.recycle()
         }
     }
 
@@ -201,6 +258,7 @@ class RynkIme : InputMethodService() {
     override fun onDestroy() {
         Native.kbFinishInput()
         loader.shutdown()
+        renderThread.quitSafely()
         super.onDestroy()
     }
 }

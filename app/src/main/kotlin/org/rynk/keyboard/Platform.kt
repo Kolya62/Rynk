@@ -21,6 +21,8 @@ internal object Platform {
         val t = e.eventTime
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                // the first finger: no other is down, so drop touches whose release got lost
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) send(3, 0, 0f, 0f, t)
                 val i = e.actionIndex
                 send(0, e.getPointerId(i), e.getX(i), e.getY(i), t)
             }
