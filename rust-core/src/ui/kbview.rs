@@ -113,6 +113,22 @@ fn paint_strip(kb: &Keyboard, g: &P) {
                     icons::chevron_down(g.p, c, 24.0, col);
                 }
             }
+            StripItem::Query(q) => {
+                let r = Rect::from_min_max(pos2(x0 + 6.0, h * 0.16), pos2(x1 - 6.0, h * 0.84));
+                g.p.rect_filled(r, CornerRadius::same(8), g.pal.key);
+                let s = r.height() * 0.5;
+                icons::search(g.p, pos2(r.left() + s, c.y), s, g.pal.hint);
+                let text_c = pos2((r.left() + 2.0 * s + r.right()) / 2.0, c.y);
+                let max_w = r.width() - 2.5 * s;
+                if q.is_empty() {
+                    g.text_fit(text_c, "…", 16.0, max_w, g.pal.hint);
+                } else {
+                    g.text_fit(text_c, &format!("{q}|"), 16.0, max_w, g.pal.strip_text);
+                }
+            }
+            StripItem::Emoji(e) => {
+                emoji_image(kb, g.p, e, c, (h * 0.6).min(cell - 4.0));
+            }
             StripItem::Tool(t) => {
                 let col = g.pal.strip_text;
                 let s = 24.0;
@@ -231,33 +247,39 @@ fn paint_emoji(kb: &Keyboard, g: &P) {
         } else if i == n - 1 {
             g.key_bg(r, g.pal.key_func);
             icons::backspace(g.p, c, 22.0, g.pal.text_func);
+        } else if i == 1 {
+            icons::search(g.p, c, 22.0, g.pal.text_func);
         } else {
-            if i - 1 == kb.emoji_cat {
+            if i - 2 == kb.emoji_cat {
                 g.p.rect_filled(r, CornerRadius::same(7), g.pal.key);
             }
-            let icon = emoji::CATEGORIES[i - 1].0;
+            let icon = emoji::CATEGORIES[i - 2].0;
             emoji_image(kb, g.p, icon, c, 26.0);
         }
     }
 }
 
-thread_local! {
-    static EMOJI_TEX: std::cell::RefCell<std::collections::HashMap<String, egui::TextureHandle>> = Default::default();
-}
-
 /// Draws a color emoji image the platform made; false when there is none yet
 fn emoji_image(kb: &Keyboard, p: &Painter, e: &str, c: Pos2, size: f32) -> bool {
     let Some(img) = kb.emoji_images.get(e) else { return false };
-    EMOJI_TEX.with(|t| {
-        let mut t = t.borrow_mut();
-        let tex = t.entry(e.to_string()).or_insert_with(|| {
-            let ci = egui::ColorImage::from_rgba_premultiplied(img.size, &img.rgba);
-            p.ctx().load_texture(format!("emoji:{e}"), ci, egui::TextureOptions::LINEAR)
+    // Textures live in the egui context they were made in, and every new surface brings a new
+    // context: keep them in the context itself so a fresh one makes its own
+    let id = egui::Id::NULL.with("emoji-textures");
+    let ctx = p.ctx();
+    let tex = ctx.data_mut(|d| d.get_temp::<std::collections::HashMap<String, egui::TextureHandle>>(id).and_then(|m| m.get(e).cloned()));
+    let tex = tex.unwrap_or_else(|| {
+        let ci = egui::ColorImage::from_rgba_premultiplied(img.size, &img.rgba);
+        let t = ctx.load_texture(format!("emoji:{e}"), ci, egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| {
+            d.get_temp_mut_or_default::<std::collections::HashMap<String, egui::TextureHandle>>(id).insert(e.to_string(), t.clone());
         });
+        t
+    });
+    {
         let aspect = img.size[0] as f32 / img.size[1].max(1) as f32;
         let r = Rect::from_center_size(c, vec2(size * aspect, size));
         p.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-    });
+    }
     true
 }
 

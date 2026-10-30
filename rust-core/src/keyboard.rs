@@ -234,6 +234,10 @@ pub enum StripItem {
     /// Opens (false) or closes (true) the full candidate panel
     Expand(bool),
     Tool(Tool),
+    /// The emoji search query; tapping it returns to the emoji palette
+    Query(String),
+    /// An emoji found by the search
+    Emoji(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,6 +299,10 @@ pub struct Keyboard {
     pub emoji_images: HashMap<String, EmojiImage>,
     /// Emoji categories already sent for drawing (the tab icons are category usize::MAX)
     emoji_asked: std::collections::HashSet<usize>,
+    /// Single emoji (search results) already sent for drawing
+    emoji_asked_one: std::collections::HashSet<String>,
+    /// The emoji search being typed: letters go to it instead of the field
+    pub emoji_query: Option<String>,
     gesture: Option<GestureCommit>,
     out: Vec<Cmd>,
     pub dirty: bool,
@@ -347,6 +355,8 @@ impl Keyboard {
             trail: Vec::new(),
             emoji_images: HashMap::new(),
             emoji_asked: Default::default(),
+            emoji_asked_one: Default::default(),
+            emoji_query: None,
             gesture: None,
             out: Vec::new(),
             dirty: true,
@@ -379,13 +389,24 @@ impl Keyboard {
                 }
             }
         }
+        if let Some(q) = &self.emoji_query {
+            let px = (self.strip_h * 0.6).round().max(16.0) as u32;
+            let new: Vec<&str> = emoji::search(q, EMOJI_RESULTS)
+                .into_iter()
+                .filter(|e| !self.emoji_images.contains_key(*e) && !self.emoji_asked_one.contains(*e))
+                .collect();
+            if !new.is_empty() {
+                self.emoji_asked_one.extend(new.iter().map(|e| e.to_string()));
+                self.out.push(Cmd::RenderEmoji(format!("{px} {}", new.join(" "))));
+            }
+        }
         std::mem::take(&mut self.out)
     }
 
     /// The platform drew an emoji
     pub fn emoji_loaded(&mut self, text: &str, image: EmojiImage) {
         self.emoji_images.insert(text.to_string(), image);
-        if self.mode == Mode::Emoji {
+        if self.mode == Mode::Emoji || self.emoji_query.is_some() {
             self.dirty = true;
         }
     }
@@ -618,6 +639,7 @@ impl Keyboard {
             self.reset_composition(false);
         }
         self.editor = editor;
+        self.emoji_query = None;
         self.mode = if self.editor.numeric() { Mode::Symbols } else { Mode::Alphabet };
         self.shift = ShiftState::Off;
         self.correction = None;
@@ -669,7 +691,7 @@ impl Keyboard {
     }
 
     fn update_auto_shift(&mut self) {
-        if self.shift == ShiftState::Caps || self.mode != Mode::Alphabet || self.lang().caseless {
+        if self.shift == ShiftState::Caps || self.mode != Mode::Alphabet || self.lang().caseless || self.emoji_query.is_some() {
             return;
         }
         let ctx = self.context();
@@ -763,6 +785,11 @@ impl Keyboard {
 
     /// Types the text of a key (or popup choice); `pos` is the touch for letters
     pub fn type_text(&mut self, text: &str, pos: Option<(f32, f32)>) {
+        if let Some(q) = &mut self.emoji_query {
+            q.push_str(&text.to_lowercase());
+            self.dirty = true;
+            return;
+        }
         self.correction = None;
         self.gesture = None;
         match self.composer() {
@@ -919,6 +946,7 @@ impl Keyboard {
     fn gesture_allowed(&self) -> bool {
         let script_ok = !matches!(self.lang().script, "Thai" | "Lao" | "Khmer" | "Myanmar" | "CJK" | "Ethiopic");
         self.prefs.swipe_typing
+            && self.emoji_query.is_none()
             && self.mode == Mode::Alphabet
             && self.composer() == Composer::None
             && self.predictor.model.is_some()
@@ -970,6 +998,13 @@ impl Keyboard {
     }
 
     pub fn space(&mut self, t: f64) {
+        if let Some(q) = &mut self.emoji_query {
+            if !q.is_empty() && !q.ends_with(' ') {
+                q.push(' ');
+            }
+            self.dirty = true;
+            return;
+        }
         if self.gesture.take().is_some() {
             // a gesture word already ends with a space
             self.dirty = true;
@@ -1012,6 +1047,11 @@ impl Keyboard {
     }
 
     pub fn backspace(&mut self) {
+        if let Some(q) = &mut self.emoji_query {
+            q.pop();
+            self.dirty = true;
+            return;
+        }
         self.static_grid_next = true;
         if let Some(g) = self.gesture.take() {
             // the whole swiped word goes at once
@@ -1106,6 +1146,10 @@ impl Keyboard {
     }
 
     pub fn enter(&mut self) {
+        if self.emoji_query.is_some() {
+            self.close_emoji_search();
+            return;
+        }
         self.gesture = None;
         if self.cjk_active() {
             self.cjk_enter();
@@ -1136,6 +1180,13 @@ impl Keyboard {
                 Tool::Hide => self.emit(Cmd::Hide),
             },
             StripItem::Cand { idx, .. } => self.cjk_pick(idx),
+            StripItem::Query(_) => self.close_emoji_search(),
+            StripItem::Emoji(e) => {
+                self.commit(&e);
+                if self.prefs.vibrate {
+                    self.emit(Cmd::Haptic);
+                }
+            }
             StripItem::Expand(_) => self.toggle_cand_panel(),
             StripItem::Word { text, .. } if self.gesture.is_some() && self.composing.is_empty() => {
                 let g = self.gesture.take().unwrap();
@@ -1177,6 +1228,17 @@ impl Keyboard {
 
     /// Strip cells with their horizontal extent in px
     pub fn strip_layout(&self) -> Vec<(StripItem, f32, f32)> {
+        if let Some(q) = &self.emoji_query {
+            // the query takes a third, the found emoji share the rest
+            let found = emoji::search(q, EMOJI_RESULTS);
+            let qw = if found.is_empty() { self.width } else { self.width / 3.0 };
+            let w = (self.width - qw) / EMOJI_RESULTS as f32;
+            let mut cells = vec![(StripItem::Query(q.clone()), 0.0, qw)];
+            for (i, e) in found.into_iter().enumerate() {
+                cells.push((StripItem::Emoji(e.to_string()), qw + i as f32 * w, qw + (i + 1) as f32 * w));
+            }
+            return cells;
+        }
         if self.cjk_active() {
             return self.cand_strip();
         }
@@ -1620,6 +1682,7 @@ impl Keyboard {
             KeyKind::Language => self.next_language(),
             KeyKind::Emoji => {
                 self.finish_word(true, "");
+                self.emoji_query = None;
                 self.mode = Mode::Emoji;
                 self.rebuild();
             }
@@ -1647,9 +1710,17 @@ impl Keyboard {
         }
     }
 
-    /// Bottom row of the emoji panel: [ABC] [categories…] [⌫]
+    /// Bottom row of the emoji panel: [ABC] [search] [categories…] [⌫]
     pub fn emoji_tab_count(&self) -> usize {
-        emoji::CATEGORIES.len() + 2
+        emoji::CATEGORIES.len() + 3
+    }
+
+    /// Back from the emoji search to the palette
+    fn close_emoji_search(&mut self) {
+        self.emoji_query = None;
+        self.mode = Mode::Emoji;
+        self.rebuild();
+        self.dirty = true;
     }
 
     fn tap_emoji_tabs(&mut self, x: f32) {
@@ -1659,10 +1730,16 @@ impl Keyboard {
             self.mode = Mode::Alphabet;
             self.rebuild();
             self.update_auto_shift();
+        } else if i == 1 {
+            // search: letters type the query, the strip shows what it finds
+            self.emoji_query = Some(String::new());
+            self.mode = Mode::Alphabet;
+            self.shift = ShiftState::Off;
+            self.rebuild();
         } else if i == n - 1 {
             self.backspace();
         } else {
-            self.emoji_cat = i - 1;
+            self.emoji_cat = i - 2;
             self.emoji_scroll = 0.0;
         }
         self.dirty = true;
@@ -1823,6 +1900,9 @@ impl Keyboard {
 }
 
 /// Combining vowel signs and other marks that need a base to be visible
+/// Emoji the search shows at once in the strip
+const EMOJI_RESULTS: usize = 5;
+
 pub fn is_mark(c: char) -> bool {
     // combining marks used by Brahmic, Thai, Khmer, Myanmar, Arabic and Hebrew vowel signs
     matches!(c as u32,
@@ -2276,6 +2356,34 @@ mod tests {
     }
 
     /// Random touches, field changes and resizes must never panic (a panic kills the keyboard)
+    #[test]
+    fn emoji_search_types_the_query_and_commits_the_emoji() {
+        let mut k = kb(&["ru"]);
+        let (mut text, mut comp, mut t) = (String::new(), None, 0.0);
+        tap_kind(&mut k, KeyKind::Emoji, &mut t);
+        // the search tab is the second of the bottom row
+        let (_, bottom) = k.emoji_area();
+        let x = k.width / k.emoji_tab_count() as f32 * 1.5;
+        k.touch_down(1, x, bottom + 10.0, t);
+        k.touch_up(1, x, bottom + 10.0, t + 40.0);
+        t += 120.0;
+        assert_eq!(k.mode, Mode::Alphabet);
+        type_str(&mut k, "огонь", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "", "letters go to the query, not the field");
+        let items = k.strip_items();
+        assert_eq!(items[0], StripItem::Query("огонь".into()));
+        let fire = items.iter().position(|i| *i == StripItem::Emoji("🔥".into())).expect("🔥 found");
+        k.pick_strip(fire);
+        apply(&mut text, &mut comp, k.take_commands());
+        assert_eq!(text, "🔥");
+        type_str(&mut k, "<", &mut text, &mut comp, &mut t);
+        assert_eq!(text, "🔥", "backspace edits the query");
+        assert_eq!(k.emoji_query.as_deref(), Some("огон"));
+        k.pick_strip(0);
+        assert_eq!(k.mode, Mode::Emoji);
+        assert!(k.emoji_query.is_none());
+    }
+
     #[test]
     fn random_input_never_panics() {
         let mut seed = 0x2545F4914F6CDD1Du64;

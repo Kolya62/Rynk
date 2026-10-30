@@ -35,3 +35,9 @@ Built by `tools/cjkgen.py`.
 
 - The Russian word list is extended with word forms from the Leipzig corpus
   `rus-ru_web-public_2019_1M` (CC BY).
+
+## Emoji search
+
+- `rust-core/src/emoji_names.txt` holds emoji keywords from the Unicode **CLDR** annotations
+  (English and Russian, release 47), © Unicode, Inc., under the
+  [Unicode License v3](https://www.unicode.org/license.txt). Built with `tools/emoji_names.py`.
